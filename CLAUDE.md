@@ -14,8 +14,7 @@ recipe for creating a new VM.
 - Disks are 256 GB qcow2, thin-provisioned.
 - RAM: VMs boot at 4 GB (`currentMemory`) with a 16 GB ceiling (`memory`),
   resized live via virtio-balloon — see "Memory management" below.
-- CPU: VMs boot with 2 vCPUs, hotpluggable up to 8 (`maxvcpus`) — see
-  "CPU management" below.
+- CPU: every VM gets 8 vCPUs, fixed (the host has 32 threads).
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
 - Use `--connect qemu:///system` for all virsh/virt-install commands.
@@ -130,11 +129,6 @@ chpasswd:
       password: ${PASS}
       type: text
 ssh_pwauth: false
-write_files:
-  # Auto-online hotplugged vCPUs (Ubuntu leaves them offline by default):
-  - path: /etc/udev/rules.d/80-hotplug-cpu.rules
-    content: |
-      SUBSYSTEM=="cpu", ACTION=="add", ATTR{online}=="0", ATTR{online}="1"
 EOF
 # If a Tailscale pre-auth key was provided, append to user-data:
 #   runcmd:
@@ -149,7 +143,7 @@ virt-install --connect qemu:///system \
   --name ${NAME} \
   --memory memory=16384,currentMemory=4096 \
   --memballoon model=virtio,autodeflate=on,freePageReporting=on \
-  --vcpus 2,maxvcpus=8 \
+  --vcpus 8 \
   --disk path=$HOME/kvm/${NAME}.qcow2,format=qcow2,bus=virtio \
   --disk path=$HOME/kvm/${NAME}-seed.img,format=raw,bus=virtio \
   --import \
@@ -198,22 +192,16 @@ virsh --connect qemu:///system dommemstat ${NAME}
 
 ## CPU management
 
-VMs boot with 2 vCPUs and can be grown live up to the `maxvcpus=8`
-ceiling. The guest only sees (and its udev rule from cloud-init only
-onlines) the currently granted count — unlike RAM, the ceiling is
-invisible inside the VM:
+Every VM has 8 fixed vCPUs. There is no time cap within them — a VM can
+run all 8 at 100%; with 32 host threads that's acceptable. Changing the
+count needs a shutdown:
 
 ```bash
-virsh --connect qemu:///system setvcpus ${NAME} 4 --live
-virsh --connect qemu:///system vcpucount ${NAME}
+virsh --connect qemu:///system shutdown ${NAME}    # wait for "shut off"
+virsh --connect qemu:///system setvcpus ${NAME} 16 --maximum --config
+virsh --connect qemu:///system setvcpus ${NAME} 16 --config
+virsh --connect qemu:///system start ${NAME}
 ```
-
-- No time cap within granted vCPUs — a VM can run all of them at 100%.
-  Fine by default; the host has far more threads than VMs need.
-- Raising the 8-vCPU ceiling needs a shutdown:
-  `virsh setvcpus ${NAME} 16 --maximum --config`, then start again.
-- Shrinking live (`setvcpus 2 --live`) hot-unplugs; if the guest refuses,
-  set it with `--config` and it applies at next reboot.
 
 ## Tailscale (manual path, when no pre-auth key)
 
@@ -253,6 +241,6 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
   LAN/host/bridge unreachable from guest, internet + public DNS OK,
   balloon grew 4→8 GB instantly and shrank back (~20 s to settle).
   One-time host setup (nwfilter + default network) applied on this host.
-- 2026-07-10: CPU policy — 2 vCPUs, hotplug up to maxvcpus=8. Requires the
-  udev auto-online rule (now in cloud-init user-data; Ubuntu leaves
-  hotplugged CPUs offline without it). Validated on `tkws`: 2→8→2 live.
+- 2026-07-10: CPU policy — fixed 8 vCPUs per VM (hotplug tried first and
+  worked — 2→8→2 live with a udev auto-online rule — but dropped for
+  simplicity; the host's 32 threads make overcommit a non-issue).

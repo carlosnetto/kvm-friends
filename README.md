@@ -24,7 +24,7 @@ Local only (gitignored):
 | File | Purpose |
 |---|---|
 | `noble-server-cloudimg-amd64.img` | Base image: Ubuntu Server 24.04 LTS cloud image (downloaded at bootstrap, checksum-verified). **Never boot or modify this file** — always copy it. |
-| `<vm-name>.qcow2` | A VM's disk (256 GB virtual, thin-provisioned — grows with use). VMs get 4 GB RAM (growable live to 16 GB) and 2 vCPUs (growable live to 8) on request. |
+| `<vm-name>.qcow2` | A VM's disk (256 GB virtual, thin-provisioned — grows with use). VMs get 4 GB RAM (growable live to 16 GB on request) and 8 vCPUs. |
 | `<vm-name>-seed.img` | The VM's cloud-init seed (user, SSH keys, hostname, console password). Only used on first boot. |
 | `<vm-name>-console-password.txt` | Password for local serial-console login (not usable over SSH). |
 
