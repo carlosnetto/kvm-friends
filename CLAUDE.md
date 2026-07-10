@@ -12,6 +12,8 @@ recipe for creating a new VM.
 - VMs are headless: `--graphics none`, serial console only. No X, no
   browser, minimal server packages only.
 - Disks are 256 GB qcow2, thin-provisioned.
+- RAM: VMs boot at 4 GB (`currentMemory`) with a 16 GB ceiling (`memory`),
+  resized live via virtio-balloon — see "Memory management" below.
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
 - Use `--connect qemu:///system` for all virsh/virt-install commands.
@@ -138,7 +140,9 @@ rm user-data meta-data
 
 virt-install --connect qemu:///system \
   --name ${NAME} \
-  --memory 4096 --vcpus 2 \
+  --memory memory=16384,currentMemory=4096 \
+  --memballoon model=virtio,autodeflate=on,freePageReporting=on \
+  --vcpus 2 \
   --disk path=$HOME/kvm/${NAME}.qcow2,format=qcow2,bus=virtio \
   --disk path=$HOME/kvm/${NAME}-seed.img,format=raw,bus=virtio \
   --import \
@@ -163,6 +167,27 @@ ssh ${FRIEND}@<ip> 'hostname; df -h /'
 GW=$(ip route show default | awk '{print $3; exit}')   # host's LAN gateway
 ssh ${FRIEND}@<ip> "ping -c1 -W2 ${GW}; ping -c1 -W2 192.168.122.1; curl -sI https://ubuntu.com | head -1"
 ```
+
+## Memory management
+
+VMs see 16 GB installed but the balloon keeps them at 4 GB. Growing is a
+host-side action (it does NOT happen automatically on guest demand):
+
+```bash
+# Grow (or shrink) live, up to the 16 GB ceiling:
+virsh --connect qemu:///system setmem ${NAME} 8G --live
+# Inspect balloon and guest usage:
+virsh --connect qemu:///system dommemstat ${NAME}
+```
+
+- `autodeflate=on`: if the guest is about to OOM it may reclaim balloon
+  memory by itself — a safety valve, not a sizing mechanism.
+- `freePageReporting=on`: memory the guest frees is returned to the host,
+  so idle VMs cost roughly what they actually use.
+- Raising the 16 GB ceiling needs a shutdown:
+  `virsh setmaxmem ${NAME} 24G --config` then start again.
+- Don't promise the sum of all ceilings: grow VMs only while the host has
+  real free RAM (`free -h`).
 
 ## Tailscale (manual path, when no pre-auth key)
 
@@ -196,3 +221,6 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
   Not yet validated against a live VM: the first VM created must pass the
   isolation check in "After boot". Folder made portable for GitHub
   (bootstrap section, .gitignore for images/disks/secrets).
+- 2026-07-10: memory policy — boot at 4 GB, virtio-balloon up to a 16 GB
+  ceiling, autodeflate + free-page-reporting on. Also unvalidated until
+  the next VM boots.
