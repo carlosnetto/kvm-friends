@@ -244,6 +244,9 @@ virsh --connect qemu:///system start ${NAME}
 
 ## Destroying a VM (only when Carlos explicitly asks)
 
+Automated: `./destroy-vm.sh <name>` (retype the name to confirm, or
+`--yes`). Overview of all VMs: `./list-vm.sh`. Manual equivalent:
+
 ```bash
 virsh --connect qemu:///system destroy ${NAME}      # if running
 virsh --connect qemu:///system undefine ${NAME}
@@ -276,3 +279,5 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
   revoked, friend retained). Lesson recorded: the remover matches the key
   *material* only — Carlos's .pub has a trailing space that made full-line
   matching fail silently. Serial-console + password recovery also proven.
+- 2026-07-10: `list-vm.sh` and `destroy-vm.sh` added; destroy validated on
+  `vm-demo` (domain + files removed, known_hosts cleaned).

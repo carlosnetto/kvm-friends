@@ -16,6 +16,8 @@ Versioned (in git):
 | File | Purpose |
 |---|---|
 | `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key), builds and boots it, runs the isolation check, sets up Tailscale. |
+| `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. |
+| `destroy-vm.sh` | Destroys a VM and all its files (asks you to retype the name; `--yes` to skip). |
 | `isolate-guest.xml` | libvirt nwfilter applied to every VM's NIC: internet-only egress, no access to the host's LAN, the host itself, or other VMs. |
 | `default-net.xml` | The libvirt NAT network with host DNS disabled — VMs get public DNS (1.1.1.1 / 9.9.9.9) via DHCP. |
 | `CLAUDE.md` | The operational recipe: host bootstrap, VM creation, handoff, teardown. |
