@@ -15,6 +15,7 @@ Versioned (in git):
 
 | File | Purpose |
 |---|---|
+| `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key), builds and boots it, runs the isolation check, sets up Tailscale. |
 | `isolate-guest.xml` | libvirt nwfilter applied to every VM's NIC: internet-only egress, no access to the host's LAN, the host itself, or other VMs. |
 | `default-net.xml` | The libvirt NAT network with host DNS disabled — VMs get public DNS (1.1.1.1 / 9.9.9.9) via DHCP. |
 | `CLAUDE.md` | The operational recipe: host bootstrap, VM creation, handoff, teardown. |
@@ -83,7 +84,9 @@ tailnet needs their approval. Two ways:
 
 Once Tailscale works and the friend can SSH in:
 
-1. Friend (or Carlos) removes Carlos's line from `~/.ssh/authorized_keys`.
+1. Friend runs `~/REMOVE_TK_SSH_PUB_KEY.sh` — it revokes Carlos's temporary
+   key and deletes itself. (Manual way: remove Carlos's line from
+   `~/.ssh/authorized_keys`.)
 2. Friend runs `passwd` to set their own console password.
 3. Optional hardening: `sudo rm /etc/sudoers.d/90-cloud-init-users` so sudo
    requires a password.

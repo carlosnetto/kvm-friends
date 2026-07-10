@@ -98,6 +98,10 @@ What `isolate-guest.xml` does:
 
 ## Recipe
 
+Automated: `./create-vm.sh [name] [login] ['ssh-... key'] [tskey]` runs
+everything in this section plus the after-boot checks and Tailscale setup
+(prompts for missing inputs). The manual steps below remain the reference.
+
 ```bash
 cd ~/kvm
 NAME=vm-joao            # VM name / hostname
@@ -129,6 +133,26 @@ chpasswd:
       password: ${PASS}
       type: text
 ssh_pwauth: false
+write_files:
+  # Handoff helper: friend runs it to revoke Carlos's temporary key.
+  - path: /home/${FRIEND}/REMOVE_TK_SSH_PUB_KEY.sh
+    permissions: '0755'
+    owner: ${FRIEND}:${FRIEND}
+    defer: true
+    content: |
+      #!/bin/bash
+      # Removes Carlos's temporary setup key from this machine, making SSH
+      # access exclusively yours. Run once, any time after Tailscale works.
+      # Key material only (field 2): matching the whole line is fragile —
+      # comments/whitespace differ between the .pub file and authorized_keys.
+      KEY='$(awk '{print $2}' ~/.ssh/id_ed25519.pub)'
+      grep -vF "\$KEY" ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.new || true
+      mv ~/.ssh/authorized_keys.new ~/.ssh/authorized_keys
+      chmod 600 ~/.ssh/authorized_keys
+      echo "Carlos's key removed. Keys still authorized:"
+      awk '{print "  " \$1, \$NF}' ~/.ssh/authorized_keys
+      echo "Suggestion: also run 'passwd' to set your own console password."
+      rm -- "\$0"
 EOF
 # If a Tailscale pre-auth key was provided, append to user-data:
 #   runcmd:
@@ -212,7 +236,9 @@ virsh --connect qemu:///system start ${NAME}
 
 ## Handoff checklist
 
-1. Remove Carlos's key line from `~/.ssh/authorized_keys` in the VM.
+1. Friend runs `~/REMOVE_TK_SSH_PUB_KEY.sh` (revokes Carlos's key and
+   deletes itself). Manual equivalent: remove Carlos's line from
+   `~/.ssh/authorized_keys`.
 2. Friend runs `passwd` (their console password; serial console only).
 3. Optional: `sudo rm /etc/sudoers.d/90-cloud-init-users` (sudo asks password).
 
@@ -244,3 +270,9 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
 - 2026-07-10: CPU policy — fixed 8 vCPUs per VM (hotplug tried first and
   worked — 2→8→2 live with a udev auto-online rule — but dropped for
   simplicity; the host's 32 threads make overcommit a non-issue).
+- 2026-07-10: `create-vm.sh` automates the recipe end to end; cloud-init
+  now drops `~/REMOVE_TK_SSH_PUB_KEY.sh` in the friend's home for handoff.
+  Validated with test VM `vm-demo`, including full handoff (Carlos's key
+  revoked, friend retained). Lesson recorded: the remover matches the key
+  *material* only — Carlos's .pub has a trailing space that made full-line
+  matching fail silently. Serial-console + password recovery also proven.
