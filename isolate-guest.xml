@@ -1,0 +1,36 @@
+<filter name='isolate-guest' chain='root'>
+  <!-- Allow the DHCP exchange with the host's dnsmasq (the only host contact
+       a guest needs; DNS comes from public resolvers via default-net.xml). -->
+  <rule action='accept' direction='out' priority='100'>
+    <udp dstportstart='67' dstportend='67'/>
+  </rule>
+
+  <!-- Drop anything the VM *initiates* (state NEW) toward private space:
+       the home LAN, the host (all of its addresses), Docker bridges,
+       sibling VMs, link-local, and CGNAT (covers Tailscale IPs).
+       state='NEW' keeps host-initiated SSH into the VM working (replies are
+       ESTABLISHED and pass). -->
+  <rule action='drop' direction='out' priority='500'>
+    <all dstipaddr='10.0.0.0' dstipmask='8' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='501'>
+    <all dstipaddr='172.16.0.0' dstipmask='12' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='502'>
+    <all dstipaddr='192.168.0.0' dstipmask='16' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='503'>
+    <all dstipaddr='169.254.0.0' dstipmask='16' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='504'>
+    <all dstipaddr='100.64.0.0' dstipmask='10' state='NEW'/>
+  </rule>
+
+  <!-- The NAT network is IPv4-only; drop all IPv6 so the guest can't reach
+       the host via fe80:: link-local on the bridge. -->
+  <rule action='drop' direction='inout' priority='600'>
+    <ipv6/>
+  </rule>
+
+  <!-- Everything else (internet via the host's NAT) is accepted by default. -->
+</filter>

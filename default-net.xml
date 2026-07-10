@@ -1,0 +1,23 @@
+<network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
+  <name>default</name>
+  <!-- No <uuid>/<mac>: libvirt generates them, keeping this file portable
+       across hosts. Requires net-undefine of the old default network first
+       (see "New host bootstrap" in CLAUDE.md). -->
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <!-- Host DNS off: guests must not talk to the host, so dnsmasq serves
+       DHCP only and pushes public resolvers via DHCP option 6. -->
+  <dns enable='no'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+  <dnsmasq:options>
+    <dnsmasq:option value='dhcp-option=option:dns-server,1.1.1.1,9.9.9.9'/>
+  </dnsmasq:options>
+</network>

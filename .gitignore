@@ -1,0 +1,13 @@
+# Never commit: large binaries and per-VM secrets.
+
+# Base cloud image + cloud-init seeds
+*.img
+# VM disks
+*.qcow2
+# Console passwords
+*-console-password.txt
+# Transient cloud-init inputs (hold keys/password)
+user-data
+meta-data
+# Personal session notes
+claude.back
