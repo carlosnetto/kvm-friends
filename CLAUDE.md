@@ -222,5 +222,8 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
   isolation check in "After boot". Folder made portable for GitHub
   (bootstrap section, .gitignore for images/disks/secrets).
 - 2026-07-10: memory policy — boot at 4 GB, virtio-balloon up to a 16 GB
-  ceiling, autodeflate + free-page-reporting on. Also unvalidated until
-  the next VM boots.
+  ceiling, autodeflate + free-page-reporting on.
+- 2026-07-10: isolation + memory validated end to end with VM `tkws`:
+  LAN/host/bridge unreachable from guest, internet + public DNS OK,
+  balloon grew 4→8 GB instantly and shrank back (~20 s to settle).
+  One-time host setup (nwfilter + default network) applied on this host.
