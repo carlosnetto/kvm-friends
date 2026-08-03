@@ -5,7 +5,7 @@
 # Interactive: asks you to retype the VM name. --yes skips the prompt
 # (required when running non-interactively).
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$(readlink -f "$0")")"
 V() { virsh --connect qemu:///system "$@"; }
 err() { echo "ERROR: $*" >&2; exit 1; }
 

@@ -1,13 +1,40 @@
-# ~/kvm — Virtual Machines for Carlos's Friends
+# kvm — Virtual Machines for Carlos's Friends
 
 This repo holds the standards and tooling for KVM/libvirt virtual machines
 that Carlos hosts for friends. Each VM is a headless Ubuntu Server (no X, no
 browser, no SPICE/VNC) that the friend accesses remotely over **Tailscale**.
 
-The repo is host-independent: clone it to `~/kvm` on any Linux machine with
-KVM and follow the bootstrap in `CLAUDE.md` to reproduce the whole setup.
+The repo is host-independent: clone it anywhere on a Linux machine with KVM
+and follow the bootstrap in `CLAUDE.md` to reproduce the whole setup.
 Only recipes and network configs are versioned — VM disks, cloud-init seeds,
 console passwords, and the base image are gitignored and stay local.
+
+## Where this lives, and why
+
+On Carlos's host the folder is `/disk/1/cnetto/kvm`, on the secondary NVMe
+(a 512 GB Bestoss GM888) rather than the primary one (a 1 TB Samsung 990
+PRO). **That is deliberate: it is the smaller and slower of the two drives,
+and these VMs are not mission critical.** They are a favour for friends, so
+they get the cheaper disk, and the fast drive stays free for Carlos's own
+work. Keeping the VMs off the primary NVMe also means their I/O never
+competes with the host's.
+
+The trade-offs are accepted, not overlooked:
+
+- **Less headroom.** ~445 GB free here versus ~754 GB on the primary disk.
+  Disks are thin-provisioned 256 GB each, so two VMs could in principle
+  overcommit this drive. Actual usage is a few GB per VM; check `df -h
+  /disk/1` before adding a third VM or letting one grow large.
+- **Lower endurance and speed.** A budget drive. Fine for VMs that mostly
+  idle; do not move anything latency-sensitive or write-heavy here.
+- **No RAID, no backups.** If this drive dies, the VMs are gone. That is
+  acceptable because a VM is reproducible: `create-vm.sh` rebuilds one from
+  scratch in a couple of minutes. Friends should not keep the only copy of
+  anything they care about inside their VM — tell them so at handoff.
+
+If a VM ever *does* become important, move it to the primary disk following
+"Moving the folder to another disk" in `CLAUDE.md` — never by symlinking,
+which leaves the domain XML pointing at a path that does not exist.
 
 ## What's in this folder
 
@@ -16,7 +43,8 @@ Versioned (in git):
 | File | Purpose |
 |---|---|
 | `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key), builds and boots it, runs the isolation check, sets up Tailscale. |
-| `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. |
+| `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM and starts/stops them with single keys. Run `./vm-tui.py`; uv builds its environment on first run. |
+| `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. Same data as `vm-tui.py`, for scripts and pipes. |
 | `destroy-vm.sh` | Destroys a VM and all its files (asks you to retype the name; `--yes` to skip). |
 | `isolate-guest.xml` | libvirt nwfilter applied to every VM's NIC: internet-only egress, no access to the host's LAN, the host itself, or other VMs. |
 | `default-net.xml` | The libvirt NAT network with host DNS disabled — VMs get public DNS (1.1.1.1 / 9.9.9.9) via DHCP. |
@@ -99,21 +127,58 @@ admin he can always access the disk/console. That's inherent to hosting.
 
 ## Managing VMs (run on the host)
 
+The easy way — an interactive list where you pick a VM and press a key:
+
+```bash
+cd /disk/1/cnetto/kvm
+./vm-tui.py
+```
+
+| Key | Does |
+|---|---|
+| `s` | Start the selected VM (this is how you wake a dormant one). |
+| `h` | Graceful shutdown — asks the guest to power off cleanly. |
+| `f` | Force off. Like pulling the plug; asks for confirmation first. |
+| `c` | Attach to the serial console (`Ctrl+]` to detach). |
+| `r` | Refresh now (it also refreshes itself every 5 s). |
+| `q` | Quit. |
+
+The table refreshes on its own, so after `s` you can watch the state flip to
+`running` and an IP appear a few seconds later. Note that `h` only works once
+the guest has actually booted — ACPI shutdown sent to a VM that is still
+starting is silently discarded, so wait for its IP to show up first (the tool
+warns you if you press `h` too early).
+
+`vm-tui.py` needs [uv](https://docs.astral.sh/uv/), which reads the dependency
+block at the top of the script and builds a cached, isolated environment on
+first run. Nothing is installed into the system Python. On a new host:
+`brew install uv python@3.13` (or the distro equivalent).
+
+The underlying commands, if you prefer typing them:
+
 ```bash
 virsh --connect qemu:///system list --all           # list VMs
-virsh --connect qemu:///system start <vm-name>
+virsh --connect qemu:///system start <vm-name>      # wake a dormant VM
 virsh --connect qemu:///system shutdown <vm-name>   # graceful stop
 virsh --connect qemu:///system console <vm-name>    # serial console (exit: Ctrl+])
-virsh --connect qemu:///system autostart <vm-name>  # start on host boot
+virsh --connect qemu:///system autostart <vm-name>  # start on host boot (see note)
 
 # Destroy a VM completely (irreversible):
 virsh --connect qemu:///system destroy <vm-name>        # force power-off (if running)
 virsh --connect qemu:///system undefine <vm-name>       # remove definition
-rm ~/kvm/<vm-name>.qcow2 ~/kvm/<vm-name>-seed.img \
-   ~/kvm/<vm-name>-console-password.txt                 # delete disk, seed, password
+rm /disk/1/cnetto/kvm/<vm-name>.qcow2 \
+   /disk/1/cnetto/kvm/<vm-name>-seed.img \
+   /disk/1/cnetto/kvm/<vm-name>-console-password.txt    # delete disk, seed, password
 ssh-keygen -R <vm-ip>   # forget its host key, or the next VM reusing the IP
                         # triggers a "HOST IDENTIFICATION CHANGED" warning
 ```
+
+Autostart is currently **off** for every VM, which is what you want while
+the disks live on `/disk/1`: libvirtd could otherwise try to start a VM
+before that filesystem is mounted. If you ever enable it, make sure the
+mount is ordered before `libvirtd.service` (`/disk/1` is mounted from
+`/etc/fstab` by UUID, so add `x-systemd.before=libvirtd.service` to its
+mount options).
 
 ---
 

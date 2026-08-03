@@ -11,3 +11,6 @@ user-data
 meta-data
 # Personal session notes
 claude.back
+
+# Python bytecode from vm-tui.py
+__pycache__/

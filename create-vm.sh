@@ -6,7 +6,10 @@
 # optional: without it, Tailscale is installed over SSH and the login URL
 # printed for the friend to approve on their own account.
 set -euo pipefail
-cd "$(dirname "$0")"
+# readlink -f: resolve symlinks so $PWD below is the real folder. Invoked via a
+# symlink, bash keeps the logical path and virt-install would record that path
+# in the domain XML — the VM would then depend on the symlink forever.
+cd "$(dirname "$(readlink -f "$0")")"
 
 V()    { virsh --connect qemu:///system "$@"; }
 err()  { echo "ERROR: $*" >&2; exit 1; }

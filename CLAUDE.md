@@ -1,12 +1,23 @@
-# CLAUDE.md — ~/kvm
+# CLAUDE.md — the kvm folder
 
 Folder for headless KVM virtual machines Carlos hosts for friends. Read
 `README.md` for the human-facing overview. This file is the operational
 recipe for creating a new VM.
 
+**On this host the folder lives at `/disk/1/cnetto/kvm`** (a dedicated
+469 GB NVMe, separate from the root disk). It is not under `$HOME` — the
+commands below use `$PWD`/relative paths so they work wherever the repo
+is cloned. Never hardcode `~/kvm`.
+
 ## Ground rules
 
 - Everything (disks, seeds, base images) lives in this folder.
+- Domain XML records **absolute** disk paths. If the folder ever moves,
+  the domains must be repointed or they fail to start — see "Moving the
+  folder to another disk" below. Do not paper over a move with a symlink
+  at the old path: it works at the I/O layer (AppArmor's `virt-aa-helper`
+  resolves symlinks correctly), but the XML then permanently records a
+  path that does not exist, which breaks the repo's portability promise.
 - `noble-server-cloudimg-amd64.img` is the pristine Ubuntu 24.04 LTS cloud
   image. Never boot, resize, or modify it — always `cp` it to a new file.
 - VMs are headless: `--graphics none`, serial console only. No X, no
@@ -30,12 +41,15 @@ recipe for creating a new VM.
 # 1. Packages (Debian/Ubuntu):
 sudo apt install qemu-kvm libvirt-daemon-system virtinst cloud-image-utils
 
-# 2. Clone this repo to ~/kvm and give libvirt access to it:
-setfacl -m u:libvirt-qemu:rwx ~/kvm
-setfacl -m u:libvirt-qemu:x "$HOME"
+# 2. Clone this repo somewhere with room for the disks (on this host:
+#    /disk/1/cnetto/kvm) and give libvirt access to it:
+cd /path/to/kvm
+setfacl -m u:libvirt-qemu:rwx .
+# Every parent dir must be traversable by libvirt-qemu. Under $HOME (mode
+# 750) that needs an ACL; under /disk/1 (mode 755) it is already fine:
+#   setfacl -m u:libvirt-qemu:x "$HOME"
 
 # 3. Download the pristine base image (gitignored — too big) and verify it:
-cd ~/kvm
 curl -fsSL -O https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 curl -fsSL https://cloud-images.ubuntu.com/noble/current/SHA256SUMS \
   | sha256sum -c --ignore-missing
@@ -67,7 +81,7 @@ Two files in this repo implement it; run once per host, while no VM is
 running:
 
 ```bash
-cd ~/kvm
+cd /disk/1/cnetto/kvm          # this repo, wherever it is cloned
 # 1. Define the per-NIC packet filter (idempotent; redefine to update):
 virsh --connect qemu:///system nwfilter-define isolate-guest.xml
 
@@ -103,7 +117,7 @@ everything in this section plus the after-boot checks and Tailscale setup
 (prompts for missing inputs). The manual steps below remain the reference.
 
 ```bash
-cd ~/kvm
+cd /disk/1/cnetto/kvm   # this repo, wherever it is cloned
 NAME=vm-joao            # VM name / hostname
 FRIEND=joao             # login name
 FRIEND_KEY='ssh-ed25519 AAAA... friend'
@@ -168,8 +182,8 @@ virt-install --connect qemu:///system \
   --memory memory=16384,currentMemory=4096 \
   --memballoon model=virtio,autodeflate=on,freePageReporting=on \
   --vcpus 8 \
-  --disk path=$HOME/kvm/${NAME}.qcow2,format=qcow2,bus=virtio \
-  --disk path=$HOME/kvm/${NAME}-seed.img,format=raw,bus=virtio \
+  --disk path=$PWD/${NAME}.qcow2,format=qcow2,bus=virtio \
+  --disk path=$PWD/${NAME}-seed.img,format=raw,bus=virtio \
   --import \
   --os-variant ubuntu24.04 \
   --network network=default,model=virtio,filterref=isolate-guest \
@@ -242,17 +256,69 @@ virsh --connect qemu:///system start ${NAME}
 2. Friend runs `passwd` (their console password; serial console only).
 3. Optional: `sudo rm /etc/sudoers.d/90-cloud-init-users` (sudo asks password).
 
+## Day-to-day: starting and stopping VMs
+
+`./vm-tui.py` is the interactive front end — a list of every VM with
+single-key start (`s`), graceful shutdown (`h`), force off (`f`, confirmed)
+and serial console (`c`). It is a Textual app run through uv: the PEP 723
+metadata block at the top of the script declares `requires-python` and
+`textual`, and `uv run` builds a cached environment on first use, so there
+is nothing to pip-install. A new host needs `uv` and Python 3.13
+(`brew install uv python@3.13`).
+
+Equivalent one-liners:
+
+```bash
+virsh --connect qemu:///system start ${NAME}       # wake a dormant VM
+virsh --connect qemu:///system shutdown ${NAME}    # graceful (ACPI)
+virsh --connect qemu:///system destroy ${NAME}     # force off, unclean
+```
+
+`shutdown` is an ACPI request: a guest that has not finished booting has
+nothing listening yet and the request is silently dropped. Wait until the
+VM has an IP before shutting it down, or the VM will look stuck.
+
 ## Destroying a VM (only when Carlos explicitly asks)
 
 Automated: `./destroy-vm.sh <name>` (retype the name to confirm, or
-`--yes`). Overview of all VMs: `./list-vm.sh`. Manual equivalent:
+`--yes`). Overview of all VMs: `./list-vm.sh`, or `./vm-tui.py` for the
+interactive view. Manual equivalent:
 
 ```bash
 virsh --connect qemu:///system destroy ${NAME}      # if running
 virsh --connect qemu:///system undefine ${NAME}
-rm ~/kvm/${NAME}.qcow2 ~/kvm/${NAME}-seed.img ~/kvm/${NAME}-console-password.txt
+rm ./${NAME}.qcow2 ./${NAME}-seed.img ./${NAME}-console-password.txt
 ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
 ```
+
+## Moving the folder to another disk
+
+Domain XML stores absolute disk paths, so moving the folder without
+repointing the domains makes them fail to start ("Cannot access storage
+file"). Nothing is lost — it is only a start failure — but the fix is
+mandatory. With all VMs shut off:
+
+```bash
+SRC=/home/cnetto/kvm; DST=/disk/1/cnetto/kvm
+for d in $(virsh --connect qemu:///system list --all --name); do
+  virsh --connect qemu:///system dumpxml "$d" > /tmp/$d.bak.xml   # back up first
+done
+rsync -aHAX --sparse "$SRC"/ "$DST"/
+rsync -naHAXc --delete "$SRC"/ "$DST"/        # must print nothing = identical
+setfacl -m u:libvirt-qemu:rwx "$DST"          # re-assert; may not survive the copy
+
+# Repoint every domain, then redefine (UUID is in the XML, so it is preserved):
+for d in $(virsh --connect qemu:///system list --all --name); do
+  virsh --connect qemu:///system dumpxml "$d" | sed "s#$SRC/#$DST/#g" > /tmp/$d.new.xml
+  virsh --connect qemu:///system define /tmp/$d.new.xml
+done
+virsh --connect qemu:///system domblklist <name>   # confirm new paths
+```
+
+Verify by renaming the old folder aside *before* starting a VM — if it
+boots, there is provably no fallback to the old path. Only then delete
+the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
+`/etc/apparmor.d/libvirt/libvirt-<uuid>.files` from the XML on each start.
 
 ## History
 
@@ -281,3 +347,22 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
   matching fail silently. Serial-console + password recovery also proven.
 - 2026-07-10: `list-vm.sh` and `destroy-vm.sh` added; destroy validated on
   `vm-demo` (domain + files removed, known_hosts cleaned).
+- 2026-08-02: folder moved from `/home/cnetto/kvm` to `/disk/1/cnetto/kvm`
+  (dedicated 512 GB NVMe) and both domains repointed. Verified by renaming
+  the old folder away first: `vm-bruno` and `vm-chisman` both booted and
+  got DHCP leases, and the generated AppArmor profiles named the new
+  paths. A symlink at the old path was considered and rejected — it is
+  transparent to QEMU and AppArmor (`virt-aa-helper` resolves symlinks;
+  confirmed with a dry run), but `create-vm.sh` used `cd "$(dirname
+  "$0")"`, and bash keeps the *logical* path through a symlink, so every
+  future VM would have been registered under the non-existent old path.
+  Script hardened with `readlink -f` so `$PWD` is always the real folder
+  (`list-vm.sh` and `destroy-vm.sh` too).
+- 2026-08-02: `vm-tui.py` added — a Textual TUI listing all VMs with
+  single-key start/shutdown/force-off/console, run via uv (PEP 723 inline
+  metadata, Python 3.13, no pip install). Verified headlessly with
+  `App.run_test()`: table populates from live virsh, action guards hold on
+  stopped VMs, the force-off modal opens and cancels, and `s` then `h`
+  took `vm-bruno` from `shut off` to `running` and back. Lesson recorded in
+  the tool: ACPI `shutdown` sent to a still-booting guest is silently
+  dropped, so the TUI warns when a VM has no IP yet.

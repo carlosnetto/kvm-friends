@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # list-vm.sh — one-line overview of every VM: state, IP, CPUs, RAM, disk.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$(readlink -f "$0")")"
 V() { virsh --connect qemu:///system "$@"; }
 
 printf '%-14s %-10s %-16s %5s %-12s %s\n' NAME STATE IP VCPU "RAM(cur/max)" DISK-USED
