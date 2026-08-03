@@ -7,10 +7,16 @@
 #   1. KVM/libvirt stack (qemu, virsh, virt-install, cloud-localds, setfacl)
 #      — Debian/Ubuntu only; KVM needs Linux, there is no macOS equivalent.
 #   2. uv + Python 3.13, for vm-tui.py (works on Linux or macOS).
+#   3. The pristine base cloud image, checksum-verified (Linux only — it's
+#      only ever used by the KVM host).
 #
-# Does NOT download the base cloud image or run the one-time network
-# setup — those are separate steps in CLAUDE.md ("New host bootstrap").
+# Does NOT run the one-time network isolation setup — that's a separate
+# step in CLAUDE.md ("New host bootstrap"), since it touches libvirt
+# objects (nwfilter, network) rather than installing anything.
 set -euo pipefail
+# readlink -f: land the base image next to the scripts even if invoked
+# via a symlink or from another directory.
+cd "$(dirname "$(readlink -f "$0")")"
 
 info() { echo; echo "==> $*"; }
 
@@ -70,6 +76,20 @@ if uv python list 2>/dev/null | grep -q '^cpython-3\.13'; then
 else
   info "Installing Python 3.13 (uv)"
   uv python install 3.13
+fi
+
+# ---- 3. Base cloud image ---------------------------------------------------
+BASE_IMG=noble-server-cloudimg-amd64.img
+BASE_URL=https://cloud-images.ubuntu.com/noble/current
+if [ "$(uname -s)" = Darwin ]; then
+  echo "SKIPPING base cloud image: only used by the Linux KVM host." >&2
+elif [ -f "$BASE_IMG" ] && curl -fsSL "$BASE_URL/SHA256SUMS" \
+       | sha256sum -c --ignore-missing --status 2>/dev/null; then
+  info "Base cloud image already present and verified"
+else
+  info "Downloading base cloud image (Ubuntu 24.04 LTS)"
+  curl -fsSL -O "$BASE_URL/noble-server-cloudimg-amd64.img"
+  curl -fsSL "$BASE_URL/SHA256SUMS" | sha256sum -c --ignore-missing
 fi
 
 info "Done. vm-tui.py will build its own env on first ./vm-tui.py run."

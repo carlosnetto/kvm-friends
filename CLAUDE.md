@@ -40,10 +40,7 @@ cloned — never hardcode a specific path.
 ## New host bootstrap (once per machine)
 
 ```bash
-# 1. Packages (Debian/Ubuntu, or brew for uv/Python): run ./setup-host.sh
-#    from a clone of this repo — it installs everything (idempotent).
-
-# 2. Clone this repo somewhere with room for the disks (on this host:
+# 1. Clone this repo somewhere with room for the disks (on this host:
 #    $HOME/kvm-friends) and give libvirt access to it:
 cd /path/to/kvm
 setfacl -m u:libvirt-qemu:rwx .
@@ -51,12 +48,12 @@ setfacl -m u:libvirt-qemu:rwx .
 # 750) that needs an ACL; under /disk/1 (mode 755) it is already fine:
 #   setfacl -m u:libvirt-qemu:x "$HOME"
 
-# 3. Download the pristine base image (gitignored — too big) and verify it:
-curl -fsSL -O https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-curl -fsSL https://cloud-images.ubuntu.com/noble/current/SHA256SUMS \
-  | sha256sum -c --ignore-missing
+# 2. Run ./setup-host.sh — installs the KVM/libvirt stack (apt), uv/Python
+#    3.13 (brew), and downloads + checksum-verifies the pristine base
+#    image (gitignored — too big to commit). Idempotent, safe to re-run.
+./setup-host.sh
 
-# 4. Apply the network isolation setup (next section).
+# 3. Apply the network isolation setup (next section).
 ```
 
 ## Inputs required before creating a VM (ask if missing)
@@ -376,7 +373,13 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   updated accordingly. `setup-host.sh` added — installs the KVM/libvirt
   stack (apt) and uv/Python 3.13 (brew, since that's what's already used
   for `vm-tui.py`) on a virgin machine, idempotent, so it's reusable on
-  future hosts.
+  future hosts. Lesson from a real run on this host: `usermod -aG
+  libvirt` doesn't take effect in the current shell/session, only on the
+  next login — `virsh` failing with "Permission denied" on the socket
+  right after setup is expected, not a bug. Later folded the base cloud
+  image download + checksum verify into the script too (previously a
+  separate manual step), after hitting "base image missing" on a VM
+  create right after running it.
 - 2026-08-03: memory policy changed — dropped the virtio-balloon
   (`--memballoon model=none`); every VM now gets a fixed amount of real,
   non-overcommitted RAM (16 GB by default) instead of booting small and
