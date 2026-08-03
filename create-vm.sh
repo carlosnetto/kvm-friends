@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # create-vm.sh — create a friend VM exactly as documented in CLAUDE.md.
 #
-# Usage: ./create-vm.sh [vm-name] [login] ['ssh-ed25519 AAAA... comment'] [tskey]
-# Missing arguments are prompted for. The 4th (Tailscale pre-auth key) is
-# optional: without it, Tailscale is installed over SSH and the login URL
-# printed for the friend to approve on their own account.
+# Usage: ./create-vm.sh [vm-name] [login] ['ssh-ed25519 AAAA... comment'] \
+#                        [tskey] [mem-mib] [disk-gib]
+# Missing name/login/key are prompted for. The 4th (Tailscale pre-auth key)
+# is optional: without it, Tailscale is installed over SSH and the login
+# URL printed for the friend to approve on their own account. Pass '' to
+# skip it explicitly (e.g. when scripting). The 5th (RAM, in MiB) defaults
+# to 16384 — fixed for the VM's life, no ballooning (see CLAUDE.md). The
+# 6th (disk, in GiB) defaults to 256.
 set -euo pipefail
 # readlink -f: resolve symlinks so $PWD below is the real folder. Invoked via a
 # symlink, bash keeps the logical path and virt-install would record that path
@@ -33,8 +37,12 @@ TSKEY=${4:-}
 if [ $# -lt 4 ] && [ -t 0 ]; then
   read -rp "Tailscale pre-auth key (optional, Enter to skip): " TSKEY
 fi
+MEM=${5:-16384}
+DISK=${6:-256}
 
 [[ $NAME   =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || err "VM name: lowercase letters/digits/hyphens only"
+[[ $MEM    =~ ^[0-9]+$ ]] && [ "$MEM" -ge 512 ] || err "RAM (MiB): must be a positive integer >= 512"
+[[ $DISK   =~ ^[0-9]+$ ]] && [ "$DISK" -ge 8 ]  || err "Disk (GiB): must be a positive integer >= 8"
 [[ $FRIEND =~ ^[a-z][a-z0-9_-]{0,31}$   ]] || err "login: lowercase, must start with a letter"
 [[ $FRIEND_KEY == *PRIVATE* ]] && err "that looks like a PRIVATE key — never accept those"
 [[ $FRIEND_KEY =~ ^(ssh-ed25519|ssh-rsa|ecdsa-|sk-ssh|sk-ecdsa) ]] \
@@ -45,9 +53,9 @@ for f in "$NAME.qcow2" "$NAME-seed.img" "$NAME-console-password.txt"; do
 done
 
 # ---- disk + cloud-init seed ------------------------------------------------
-info "Creating disk (256 GB, thin)"
+info "Creating disk (${DISK} GB, thin)"
 cp "$BASE_IMG" "$NAME.qcow2"
-qemu-img resize "$NAME.qcow2" 256G >/dev/null
+qemu-img resize "$NAME.qcow2" "${DISK}G" >/dev/null
 
 PASS=$(openssl rand -base64 9)
 (umask 077; echo "$PASS" > "$NAME-console-password.txt")
@@ -102,11 +110,11 @@ printf 'instance-id: %s-001\nlocal-hostname: %s\n' "$NAME" "$NAME" > "$TMP/meta-
 cloud-localds "$NAME-seed.img" "$TMP/user-data" "$TMP/meta-data"
 
 # ---- create ----------------------------------------------------------------
-info "Creating VM '$NAME' (8 vCPU, 4/16 GB RAM, isolated network)"
+info "Creating VM '$NAME' (8 vCPU, ${MEM} MiB fixed RAM, ${DISK} GB disk, isolated network)"
 virt-install --connect qemu:///system \
   --name "$NAME" \
-  --memory memory=16384,currentMemory=4096 \
-  --memballoon model=virtio,autodeflate=on,freePageReporting=on \
+  --memory "$MEM" \
+  --memballoon model=none \
   --vcpus 8 \
   --disk "path=$PWD/$NAME.qcow2,format=qcow2,bus=virtio" \
   --disk "path=$PWD/$NAME-seed.img,format=raw,bus=virtio" \

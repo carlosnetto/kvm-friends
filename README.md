@@ -42,7 +42,8 @@ Versioned (in git):
 
 | File | Purpose |
 |---|---|
-| `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key), builds and boots it, runs the isolation check, sets up Tailscale. |
+| `setup-host.sh` | One-time host setup: installs the KVM/libvirt stack (apt) plus uv/Python 3.13 (brew), assuming a virgin machine. Idempotent. |
+| `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key, RAM, disk size), builds and boots it, runs the isolation check, sets up Tailscale. |
 | `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM and starts/stops them with single keys. Run `./vm-tui.py`; uv builds its environment on first run. |
 | `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. Same data as `vm-tui.py`, for scripts and pipes. |
 | `destroy-vm.sh` | Destroys a VM and all its files (asks you to retype the name; `--yes` to skip). |
@@ -55,7 +56,7 @@ Local only (gitignored):
 | File | Purpose |
 |---|---|
 | `noble-server-cloudimg-amd64.img` | Base image: Ubuntu Server 24.04 LTS cloud image (downloaded at bootstrap, checksum-verified). **Never boot or modify this file** — always copy it. |
-| `<vm-name>.qcow2` | A VM's disk (256 GB virtual, thin-provisioned — grows with use). VMs get 4 GB RAM (growable live to 16 GB on request) and 8 vCPUs. |
+| `<vm-name>.qcow2` | A VM's disk (256 GB virtual by default, thin-provisioned — grows with use). VMs get a fixed 16 GB RAM by default (no ballooning — real memory) and 8 vCPUs. |
 | `<vm-name>-seed.img` | The VM's cloud-init seed (user, SSH keys, hostname, console password). Only used on first boot. |
 | `<vm-name>-console-password.txt` | Password for local serial-console login (not usable over SSH). |
 

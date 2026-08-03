@@ -21,9 +21,13 @@ import subprocess
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Grid
+from textual.containers import Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Header, Label
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select
+
+MEM_OPTIONS = [("2 GB", 2048), ("4 GB", 4096), ("8 GB", 8192),
+               ("16 GB", 16384), ("24 GB", 24576)]
+DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
 
 VIRSH = ["virsh", "--connect", "qemu:///system"]
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -129,6 +133,95 @@ class ConfirmForceOff(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
+class CreateVM(ModalScreen[dict | None]):
+    """Collects the inputs create-vm.sh needs, then hands them back as a dict."""
+
+    CSS = """
+    CreateVM { align: center middle; }
+    #box {
+        padding: 1 2; width: 74; height: auto; border: thick $accent;
+        background: $surface;
+    }
+    #box > Label { margin-top: 1; }
+    #buttons { margin-top: 1; height: 3; align: right middle; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Label("[b]Create new VM[/]")
+            yield Label("VM name / hostname (e.g. vm-joao)")
+            yield Input(placeholder="vm-joao", id="name")
+            yield Label("Friend's login (lowercase)")
+            yield Input(placeholder="joao", id="login")
+            yield Label("Friend's SSH public key")
+            yield Input(placeholder="ssh-ed25519 AAAA... friend", id="key")
+            yield Label("Tailscale pre-auth key (optional — leave blank to skip)")
+            yield Input(placeholder="tskey-...", id="tskey")
+            yield Label("RAM (fixed, no ballooning)")
+            yield Select(MEM_OPTIONS, value=16384, id="mem", allow_blank=False)
+            yield Label("Disk")
+            yield Select(DISK_OPTIONS, value=256, id="disk", allow_blank=False)
+            with Horizontal(id="buttons"):
+                yield Button("Create", variant="success", id="create")
+                yield Button("Cancel", variant="primary", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        name = self.query_one("#name", Input).value.strip()
+        login = self.query_one("#login", Input).value.strip()
+        key = self.query_one("#key", Input).value.strip()
+        tskey = self.query_one("#tskey", Input).value.strip()
+        mem = self.query_one("#mem", Select).value
+        disk = self.query_one("#disk", Select).value
+        if not name or not login or not key:
+            self.app.notify("VM name, login, and SSH key are required",
+                             severity="error", timeout=6)
+            return
+        self.dismiss({"name": name, "login": login, "key": key,
+                      "tskey": tskey, "mem": mem, "disk": disk})
+
+
+class ConfirmDestroy(ModalScreen[bool]):
+    """Irreversible: deletes the domain, disk, seed and console password."""
+
+    CSS = """
+    ConfirmDestroy { align: center middle; }
+    #box {
+        padding: 1 2; width: 62; height: auto; border: thick $error;
+        background: $surface;
+    }
+    #box > Label { margin-bottom: 1; }
+    #buttons { margin-top: 1; height: 3; align: right middle; }
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.vm_name = name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Label(
+                f"Destroy {self.vm_name}?\n\n"
+                "This deletes the domain, disk, seed and console password.\n"
+                "This cannot be undone. Type the name to confirm:")
+            yield Input(placeholder=self.vm_name, id="confirm")
+            with Horizontal(id="buttons"):
+                yield Button("Destroy", variant="error", id="yes")
+                yield Button("Cancel", variant="primary", id="no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "yes":
+            self.dismiss(False)
+            return
+        if self.query_one("#confirm", Input).value != self.vm_name:
+            self.app.notify("name doesn't match — nothing destroyed",
+                             severity="error", timeout=6)
+            return
+        self.dismiss(True)
+
+
 class VMApp(App):
     TITLE = "friend VMs"
     CSS = """
@@ -141,6 +234,8 @@ class VMApp(App):
         ("h", "shutdown", "Shutdown"),
         ("f", "force_off", "Force off"),
         ("c", "console", "Console"),
+        ("n", "create_vm", "New"),
+        ("d", "destroy_vm", "Destroy"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
     ]
@@ -243,6 +338,75 @@ class VMApp(App):
                 self.run_virsh("destroy", vm["name"])
 
         self.push_screen(ConfirmForceOff(vm["name"]), done)
+
+    def action_create_vm(self) -> None:
+        def done(result: dict | None) -> None:
+            if result:
+                self.run_create(**result)
+
+        self.push_screen(CreateVM(), done)
+
+    @work(thread=True, group="create")
+    def run_create(self, name: str, login: str, key: str, tskey: str,
+                   mem: int, disk: int) -> None:
+        script = os.path.join(HERE, "create-vm.sh")
+        self.call_from_thread(
+            self.notify, f"Creating {name} — this takes a few minutes "
+            "(boot, SSH, isolation check, Tailscale)...", timeout=8)
+        try:
+            proc = subprocess.Popen(
+                [script, name, login, key, tskey, str(mem), str(disk)],
+                cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1)
+        except FileNotFoundError:
+            self.call_from_thread(self.notify, "create-vm.sh not found",
+                                   severity="error", timeout=10)
+            return
+        tail: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            tail.append(line)
+            if line.startswith("==>"):
+                self.call_from_thread(self.notify, line[4:], timeout=6)
+        proc.wait()
+        if proc.returncode == 0:
+            self.call_from_thread(self.notify, f"{name} created",
+                                   severity="information", timeout=10)
+        else:
+            self.call_from_thread(
+                self.notify, f"create-vm.sh failed for {name}:\n" +
+                "\n".join(tail[-6:]), severity="error", timeout=20)
+        self.refresh_vms()
+
+    def action_destroy_vm(self) -> None:
+        vm = self.selected
+        if not vm:
+            return
+
+        def done(confirmed: bool | None) -> None:
+            if confirmed:
+                self.run_destroy(vm["name"])
+
+        self.push_screen(ConfirmDestroy(vm["name"]), done)
+
+    @work(thread=True, group="action")
+    def run_destroy(self, name: str) -> None:
+        script = os.path.join(HERE, "destroy-vm.sh")
+        try:
+            p = subprocess.run([script, name, "--yes"], cwd=HERE,
+                               capture_output=True, text=True, timeout=60)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            self.call_from_thread(self.notify, f"destroy failed: {e}",
+                                   severity="error", timeout=10)
+            return
+        out = ((p.stdout or "") + (p.stderr or "")).strip()
+        msg = out.splitlines()[-1] if out else f"{name}: ok"
+        self.call_from_thread(
+            self.notify, msg,
+            severity="information" if p.returncode == 0 else "error",
+            timeout=8 if p.returncode == 0 else 12)
+        self.refresh_vms()
 
     def action_console(self) -> None:
         vm = self.selected

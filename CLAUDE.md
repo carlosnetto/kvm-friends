@@ -4,10 +4,9 @@ Folder for headless KVM virtual machines Carlos hosts for friends. Read
 `README.md` for the human-facing overview. This file is the operational
 recipe for creating a new VM.
 
-**On this host the folder lives at `/disk/1/cnetto/kvm`** (a dedicated
-469 GB NVMe, separate from the root disk). It is not under `$HOME` — the
-commands below use `$PWD`/relative paths so they work wherever the repo
-is cloned. Never hardcode `~/kvm`.
+**On this host the folder lives at `$HOME/kvm-friends`.** The commands
+below use `$PWD`/relative paths so they work wherever the repo is
+cloned — never hardcode a specific path.
 
 ## Ground rules
 
@@ -22,9 +21,12 @@ is cloned. Never hardcode `~/kvm`.
   image. Never boot, resize, or modify it — always `cp` it to a new file.
 - VMs are headless: `--graphics none`, serial console only. No X, no
   browser, minimal server packages only.
-- Disks are 256 GB qcow2, thin-provisioned.
-- RAM: VMs boot at 4 GB (`currentMemory`) with a 16 GB ceiling (`memory`),
-  resized live via virtio-balloon — see "Memory management" below.
+- Disks are qcow2, thin-provisioned, 256 GB by default (`create-vm.sh`
+  accepts a 6th argument to override, in GiB — the TUI offers 128/256/
+  512/1024).
+- RAM: every VM gets a fixed 16 GB, no ballooning (`--memballoon
+  model=none`) — real memory, not overcommitted. See "Memory management"
+  below for resizing.
 - CPU: every VM gets 8 vCPUs, fixed (the host has 32 threads).
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
@@ -38,11 +40,11 @@ is cloned. Never hardcode `~/kvm`.
 ## New host bootstrap (once per machine)
 
 ```bash
-# 1. Packages (Debian/Ubuntu):
-sudo apt install qemu-kvm libvirt-daemon-system virtinst cloud-image-utils
+# 1. Packages (Debian/Ubuntu, or brew for uv/Python): run ./setup-host.sh
+#    from a clone of this repo — it installs everything (idempotent).
 
 # 2. Clone this repo somewhere with room for the disks (on this host:
-#    /disk/1/cnetto/kvm) and give libvirt access to it:
+#    $HOME/kvm-friends) and give libvirt access to it:
 cd /path/to/kvm
 setfacl -m u:libvirt-qemu:rwx .
 # Every parent dir must be traversable by libvirt-qemu. Under $HOME (mode
@@ -81,7 +83,7 @@ Two files in this repo implement it; run once per host, while no VM is
 running:
 
 ```bash
-cd /disk/1/cnetto/kvm          # this repo, wherever it is cloned
+cd ~/kvm-friends               # this repo, wherever it is cloned
 # 1. Define the per-NIC packet filter (idempotent; redefine to update):
 virsh --connect qemu:///system nwfilter-define isolate-guest.xml
 
@@ -112,18 +114,21 @@ What `isolate-guest.xml` does:
 
 ## Recipe
 
-Automated: `./create-vm.sh [name] [login] ['ssh-... key'] [tskey]` runs
-everything in this section plus the after-boot checks and Tailscale setup
-(prompts for missing inputs). The manual steps below remain the reference.
+Automated: `./create-vm.sh [name] [login] ['ssh-... key'] [tskey] [mem-mib]
+[disk-gib]` runs everything in this section plus the after-boot checks and
+Tailscale setup (prompts for missing name/login/key; RAM and disk default
+to 16384 MiB / 256 GiB). The manual steps below remain the reference.
 
 ```bash
-cd /disk/1/cnetto/kvm   # this repo, wherever it is cloned
+cd ~/kvm-friends        # this repo, wherever it is cloned
 NAME=vm-joao            # VM name / hostname
 FRIEND=joao             # login name
 FRIEND_KEY='ssh-ed25519 AAAA... friend'
+MEM=16384               # RAM, MiB
+DISK=256                # disk, GiB
 
 cp noble-server-cloudimg-amd64.img ${NAME}.qcow2
-qemu-img resize ${NAME}.qcow2 256G
+qemu-img resize ${NAME}.qcow2 ${DISK}G
 
 PASS=$(openssl rand -base64 9)
 echo "$PASS" > ${NAME}-console-password.txt && chmod 600 ${NAME}-console-password.txt
@@ -179,8 +184,8 @@ rm user-data meta-data
 
 virt-install --connect qemu:///system \
   --name ${NAME} \
-  --memory memory=16384,currentMemory=4096 \
-  --memballoon model=virtio,autodeflate=on,freePageReporting=on \
+  --memory ${MEM} \
+  --memballoon model=none \
   --vcpus 8 \
   --disk path=$PWD/${NAME}.qcow2,format=qcow2,bus=virtio \
   --disk path=$PWD/${NAME}-seed.img,format=raw,bus=virtio \
@@ -209,24 +214,24 @@ ssh ${FRIEND}@<ip> "ping -c1 -W2 ${GW}; ping -c1 -W2 192.168.122.1; curl -sI htt
 
 ## Memory management
 
-VMs see 16 GB installed but the balloon keeps them at 4 GB. Growing is a
-host-side action (it does NOT happen automatically on guest demand):
+Every VM gets a fixed amount of real RAM at creation time (16 GB by
+default — `create-vm.sh` accepts a 5th argument to override, in MiB).
+There is no balloon (`--memballoon model=none`): the guest's memory is
+reserved on the host for the VM's whole lifetime, not overcommitted or
+grown on demand.
+
+Changing it later needs a shutdown, same pattern as vCPUs:
 
 ```bash
-# Grow (or shrink) live, up to the 16 GB ceiling:
-virsh --connect qemu:///system setmem ${NAME} 8G --live
-# Inspect balloon and guest usage:
-virsh --connect qemu:///system dommemstat ${NAME}
+virsh --connect qemu:///system shutdown ${NAME}    # wait for "shut off"
+virsh --connect qemu:///system setmaxmem ${NAME} 24G --config
+virsh --connect qemu:///system setmem ${NAME} 24G --config
+virsh --connect qemu:///system start ${NAME}
 ```
 
-- `autodeflate=on`: if the guest is about to OOM it may reclaim balloon
-  memory by itself — a safety valve, not a sizing mechanism.
-- `freePageReporting=on`: memory the guest frees is returned to the host,
-  so idle VMs cost roughly what they actually use.
-- Raising the 16 GB ceiling needs a shutdown:
-  `virsh setmaxmem ${NAME} 24G --config` then start again.
-- Don't promise the sum of all ceilings: grow VMs only while the host has
-  real free RAM (`free -h`).
+Don't promise the sum of every VM's memory: only size a VM up while the
+host has real free RAM (`free -h`) — this is genuinely reserved, not a
+soft ceiling.
 
 ## CPU management
 
@@ -366,3 +371,21 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   took `vm-bruno` from `shut off` to `running` and back. Lesson recorded in
   the tool: ACPI `shutdown` sent to a still-booting guest is silently
   dropped, so the TUI warns when a VM has no IP yet.
+- 2026-08-03: folder renamed from `/disk/1/cnetto/kvm` to
+  `$HOME/kvm-friends` on this host; all hardcoded paths in this file
+  updated accordingly. `setup-host.sh` added — installs the KVM/libvirt
+  stack (apt) and uv/Python 3.13 (brew, since that's what's already used
+  for `vm-tui.py`) on a virgin machine, idempotent, so it's reusable on
+  future hosts.
+- 2026-08-03: memory policy changed — dropped the virtio-balloon
+  (`--memballoon model=none`); every VM now gets a fixed amount of real,
+  non-overcommitted RAM (16 GB by default) instead of booting small and
+  growing live. Disk size made configurable too (256 GB default).
+  `create-vm.sh` gained optional 5th/6th arguments (RAM MiB, disk GiB).
+  `vm-tui.py` gained `n` (create VM — prompts for name/login/key/optional
+  Tailscale key, RAM via a 2/4/8/16/24 GB select, disk via a
+  128/256/512 GB/1 TB select, then streams `create-vm.sh`'s progress
+  lines as notifications) and `d` (destroy VM — modal requires retyping
+  the VM name, then runs `destroy-vm.sh --yes`). Verified headlessly with
+  `App.run_test()`: both modals open/cancel correctly, and submitting the
+  create form with valid inputs hands off the exact expected arguments.
