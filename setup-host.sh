@@ -40,6 +40,16 @@ if command -v apt-get >/dev/null 2>&1; then
     info "Adding $USER to the libvirt group (log out/in to take effect)"
     sudo usermod -aG libvirt "$USER"
   fi
+
+  # The qemu process runs as libvirt-qemu and needs access to this folder —
+  # domain XML records absolute disk paths. Every parent dir must be
+  # traversable by it too; under $HOME (mode 750 by default) that needs an
+  # ACL, so grant it there specifically rather than walking the whole tree.
+  info "Granting libvirt-qemu access to $PWD"
+  setfacl -m u:libvirt-qemu:rwx .
+  case "$PWD" in
+    "$HOME"/*|"$HOME") setfacl -m u:libvirt-qemu:x "$HOME" ;;
+  esac
 elif [ "$(uname -s)" = Darwin ]; then
   echo "SKIPPING KVM/libvirt stack: KVM is a Linux kernel feature, there is" >&2
   echo "no macOS equivalent. This step only applies on the Linux host that" >&2

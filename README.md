@@ -47,7 +47,8 @@ Versioned (in git):
 | `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM and starts/stops them with single keys. Run `./vm-tui.py`; uv builds its environment on first run. |
 | `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. Same data as `vm-tui.py`, for scripts and pipes. |
 | `destroy-vm.sh` | Destroys a VM and all its files (asks you to retype the name; `--yes` to skip). |
-| `isolate-guest.xml` | libvirt nwfilter applied to every VM's NIC: internet-only egress, no access to the host's LAN, the host itself, or other VMs. |
+| `setup-network.sh` | One-time network isolation setup: defines the nwfilter and replaces the default network. Computes this host's own subnet fresh each run. Refuses to run while a VM is running. |
+| `isolate-guest.xml` | libvirt nwfilter applied to every VM's NIC: internet-only egress, no access to the host's local network segment, the host itself, or other VMs. |
 | `default-net.xml` | The libvirt NAT network with host DNS disabled — VMs get public DNS (1.1.1.1 / 9.9.9.9) via DHCP. |
 | `CLAUDE.md` | The operational recipe: host bootstrap, VM creation, handoff, teardown. |
 

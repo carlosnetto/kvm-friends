@@ -31,9 +31,9 @@ cloned — never hardcode a specific path.
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
 - Use `--connect qemu:///system` for all virsh/virt-install commands.
-- VMs are internet-only: they must not reach the home LAN, the host, or
-  each other. Every VM NIC gets the `isolate-guest` nwfilter (see
-  "Network isolation" below). Never omit the `filterref`.
+- VMs are internet-only: they must not reach the local network segment,
+  the host, or each other. Every VM NIC gets the `isolate-guest` nwfilter
+  (see "Network isolation" below). Never omit the `filterref`.
 - This folder is a git repo, portable to any Linux/KVM host. Disks, seeds,
   console passwords and the base image are gitignored — never commit them.
 
@@ -70,21 +70,49 @@ temporary, removed at handoff.
 
 ## Network isolation (one-time host setup, before the first VM)
 
-Goal: a VM can reach the internet through the host's NAT (out via the
-site's default gateway), but cannot initiate any connection to the local
-LAN, the host itself (any of its addresses, Tailscale included), Docker
-bridges, or sibling VMs. The filter blocks all RFC1918 + link-local +
-CGNAT space, so it works unchanged on any host/LAN.
+Goal: a VM can reach the internet through the host's NAT (and make its own
+outbound tunnels/Tailscale connections — nothing restricts guest-initiated
+egress to arbitrary public IPs), but cannot initiate any connection to the
+host itself (any of its addresses, Tailscale included), sibling VMs, or
+other machines on the host's own local network segment. There is no
+inbound path from the public internet either way (no port-forwarding is
+configured) — the only ways in are the host itself (setup/maintenance) and
+Tailscale, once a VM joins a tailnet.
 
-Two files in this repo implement it; run once per host, while no VM is
-running:
+The host's own "local network segment" varies by deployment: a home
+router's private LAN, or — on a colo/VPS box with a public IP straight on
+the NIC — that public /24 (other tenants/boxes on the same segment). The
+filter template (`isolate-guest.xml`) blocks the libvirt bridge's own
+subnet, link-local, and CGNAT (Tailscale) unconditionally, and gets an
+extra rule for the host's *actual* local subnet filled in at setup time —
+computed fresh from the host's default-route interface, not assumed to be
+one of the classic RFC1918 ranges.
+
+Automated: `./setup-network.sh` runs both steps below (idempotent; refuses
+to run while a VM is running, since `net-destroy` would cut its
+networking). The manual steps remain the reference:
 
 ```bash
 cd ~/kvm-friends               # this repo, wherever it is cloned
-# 1. Define the per-NIC packet filter (idempotent; redefine to update):
-virsh --connect qemu:///system nwfilter-define isolate-guest.xml
 
-# 2. Stop guests talking DNS to the host: dnsmasq serves DHCP only and
+# 1. Compute this host's own subnet and fill it into the filter template:
+IFACE=$(ip route show default | awk '{print $5; exit}')
+CIDR=$(ip -4 -o addr show dev "$IFACE" | awk '{print $4; exit}')
+read -r NET BITS < <(python3 -c "
+import ipaddress
+n = ipaddress.ip_interface('$CIDR').network
+print(n.network_address, n.prefixlen)
+")
+sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='503'><all dstipaddr='$NET' dstipmask='$BITS' state='NEW'/></rule>|" \
+  isolate-guest.xml > /tmp/isolate-guest.xml
+
+# 2. Define the per-NIC packet filter. libvirt won't update an existing
+#    filter by name alone (needs a matching <uuid>) — undefine first; this
+#    fails loudly if a still-defined (even shut-off) VM references it.
+virsh --connect qemu:///system nwfilter-undefine isolate-guest || true
+virsh --connect qemu:///system nwfilter-define /tmp/isolate-guest.xml
+
+# 3. Stop guests talking DNS to the host: dnsmasq serves DHCP only and
 #    pushes public resolvers (1.1.1.1, 9.9.9.9) via DHCP option 6.
 #    default-net.xml carries no uuid/mac, so replace the stock network:
 virsh --connect qemu:///system net-destroy default
@@ -97,9 +125,13 @@ virsh --connect qemu:///system net-start default
 What `isolate-guest.xml` does:
 
 - Allows only the DHCP exchange (UDP 67) toward the host.
-- Drops VM-**initiated** (`state='NEW'`) IPv4 to 10.0.0.0/8, 172.16.0.0/12,
-  192.168.0.0/16, 169.254.0.0/16 and 100.64.0.0/10 (CGNAT — covers the
-  host's Tailscale IP). Everything else is accepted → internet only.
+- Drops VM-**initiated** (`state='NEW'`) IPv4 to the libvirt bridge's own
+  subnet (192.168.122.0/24 — blocks both the host's bridge address and
+  sibling VMs), 169.254.0.0/16 (link-local), 100.64.0.0/10 (CGNAT — covers
+  the host's Tailscale IP), and the host's own local-network segment
+  (computed at setup time, see above). Everything else is accepted —
+  internet, Tailscale, and any tunnel a guest sets up are all unrestricted
+  egress.
 - Drops all IPv6 (the NAT net is v4-only; blocks fe80:: paths to the host).
 - Because drops match NEW only, **host → VM SSH still works** (replies are
   ESTABLISHED) — needed for setup and the manual Tailscale path. If a VM
@@ -392,3 +424,23 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   the VM name, then runs `destroy-vm.sh --yes`). Verified headlessly with
   `App.run_test()`: both modals open/cancel correctly, and submitting the
   create form with valid inputs hands off the exact expected arguments.
+- 2026-08-03: `setup-host.sh` gained the libvirt-qemu ACL grant (repo dir
+  + `$HOME`) — hit "Cannot access storage file" on a real VM create right
+  after a fresh `setup-host.sh` run, because that step was still manual.
+- 2026-08-03: network isolation redesigned after this host moved off a
+  home LAN onto a colo box with a public IP straight on the NIC
+  (103.195.102.0/24) — the old filter only blocked RFC1918 + link-local +
+  CGNAT, so a real create-vm.sh run failed its own isolation check (guest
+  could reach the public gateway). Replaced the static home-LAN rules
+  (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) with: an unconditional rule
+  for the libvirt bridge's own subnet (192.168.122.0/24 — protects the
+  host and sibling VMs regardless of where the host physically sits), and
+  a rule for the host's *actual* local subnet computed fresh at setup time
+  from its default-route interface (works whether that's a home router's
+  private range or a colo/VPS public /24). `setup-network.sh` added to
+  automate both nwfilter steps (subnet computation + template fill,
+  undefine-before-redefine since libvirt won't update an nwfilter by name
+  without a matching `<uuid>`); refuses to run while a VM is running.
+  Validated end to end on this host: recreated `vm-tk`, isolation check
+  passed (192.168.122.1 and the real public gateway 103.195.102.1 both
+  blocked, internet still OK), Tailscale joined and reachable.
