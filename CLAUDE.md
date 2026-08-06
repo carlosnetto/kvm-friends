@@ -4,9 +4,14 @@ Folder for headless KVM virtual machines Carlos hosts for friends. Read
 `README.md` for the human-facing overview. This file is the operational
 recipe for creating a new VM.
 
-**On this host the folder lives at `$HOME/kvm-friends`.** The commands
-below use `$PWD`/relative paths so they work wherever the repo is
-cloned — never hardcode a specific path.
+**This repo is location-independent.** Every script self-locates from its
+own path (`cd "$(dirname "$(readlink -f "$0")")"`), so it works correctly
+wherever it's cloned, on any host — no path is hardcoded in the tooling.
+For running commands by hand, set `KVM_FRIENDS` to wherever you clone it
+(e.g. `export KVM_FRIENDS=$HOME/kvm-friends` in your shell rc) — every
+command below uses `$KVM_FRIENDS` instead of a literal path, so moving the
+folder to another disk or host is just updating that one variable, not
+this file.
 
 ## Ground rules
 
@@ -40,13 +45,16 @@ cloned — never hardcode a specific path.
 ## New host bootstrap (once per machine)
 
 ```bash
-# 1. Clone this repo somewhere with room for the disks (on this host:
-#    $HOME/kvm-friends) and give libvirt access to it:
-cd /path/to/kvm
+# 1. Clone this repo somewhere with room for the disks, then point
+#    KVM_FRIENDS at it — set this once (e.g. in ~/.bashrc) and every
+#    command in this doc works unchanged regardless of where it lives:
+export KVM_FRIENDS=/path/to/kvm-friends
+cd "$KVM_FRIENDS"
 setfacl -m u:libvirt-qemu:rwx .
-# Every parent dir must be traversable by libvirt-qemu. Under $HOME (mode
-# 750) that needs an ACL; under /disk/1 (mode 755) it is already fine:
-#   setfacl -m u:libvirt-qemu:x "$HOME"
+# Every parent dir must be traversable by libvirt-qemu. Under a mode-750
+# dir (e.g. $HOME) that needs an ACL; under a mode-755 parent it is
+# already fine:
+#   setfacl -m u:libvirt-qemu:x "$(dirname "$KVM_FRIENDS")"
 
 # 2. Run ./setup-host.sh — installs the KVM/libvirt stack (apt), uv/Python
 #    3.13 (brew), and downloads + checksum-verifies the pristine base
@@ -94,7 +102,7 @@ to run while a VM is running, since `net-destroy` would cut its
 networking). The manual steps remain the reference:
 
 ```bash
-cd ~/kvm-friends               # this repo, wherever it is cloned
+cd "$KVM_FRIENDS"
 
 # 1. Compute this host's own subnet and fill it into the filter template:
 IFACE=$(ip route show default | awk '{print $5; exit}')
@@ -152,7 +160,7 @@ to 16384 MiB / 256 GiB; if the base image is missing it runs
 steps below remain the reference.
 
 ```bash
-cd ~/kvm-friends        # this repo, wherever it is cloned
+cd "$KVM_FRIENDS"
 NAME=vm-joao            # VM name / hostname
 FRIEND=joao             # login name
 FRIEND_KEY='ssh-ed25519 AAAA... friend'
@@ -340,7 +348,7 @@ file"). Nothing is lost — it is only a start failure — but the fix is
 mandatory. With all VMs shut off:
 
 ```bash
-SRC=/home/cnetto/kvm; DST=/disk/1/cnetto/kvm
+SRC="$KVM_FRIENDS"; DST=/new/path/to/kvm-friends
 for d in $(virsh --connect qemu:///system list --all --name); do
   virsh --connect qemu:///system dumpxml "$d" > /tmp/$d.bak.xml   # back up first
 done
@@ -354,6 +362,10 @@ for d in $(virsh --connect qemu:///system list --all --name); do
   virsh --connect qemu:///system define /tmp/$d.new.xml
 done
 virsh --connect qemu:///system domblklist <name>   # confirm new paths
+
+# Last step: repoint the variable itself (and its shell rc entry) at $DST —
+# every command in this doc, and every script, follows it automatically.
+export KVM_FRIENDS="$DST"
 ```
 
 Verify by renaming the old folder aside *before* starting a VM — if it
@@ -464,3 +476,19 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   background `tailscale up` and scrape the login URL from the result,
   since that capture was unreliable over a non-pty SSH command; bringing
   it up is now always the documented manual step below.
+- 2026-08-06: this doc and README.md stopped hardcoding the folder's
+  location. The scripts never actually depended on a fixed path — each
+  one already self-locates from its own path (`cd "$(dirname "$(readlink
+  -f "$0")")"`) — but the docs still said `$HOME/kvm-friends` or `~/
+  kvm-friends` everywhere, which meant editing both files by hand on
+  every move (this had already happened three times: `/home/cnetto/kvm`
+  → `/disk/1/cnetto/kvm` → `$HOME/kvm-friends`). Every command in both
+  docs now uses a `$KVM_FRIENDS` env var instead; moving the folder is
+  just re-exporting that variable, not editing prose. Also caught while
+  doing this: README's "Where this lives, and why" section still
+  described the old home host's dedicated secondary NVMe (a 512 GB
+  Bestoss GM888 versus a 1 TB primary) and a `/disk/1`-mount-ordering
+  reason for autostart being off — this host (`reliablesite`, a colo
+  box) turned out to be a single 1.8 TB NVMe with one LVM root volume,
+  no secondary drive at all, so that whole rationale was stale and has
+  been rewritten to match.

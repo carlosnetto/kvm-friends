@@ -5,34 +5,35 @@ that Carlos hosts for friends. Each VM is a headless Ubuntu Server (no X, no
 browser, no SPICE/VNC) that the friend accesses remotely over **Tailscale**.
 
 The repo is host-independent: clone it anywhere on a Linux machine with KVM
-and follow the bootstrap in `CLAUDE.md` to reproduce the whole setup.
-Only recipes and network configs are versioned — VM disks, cloud-init seeds,
-console passwords, and the base image are gitignored and stay local.
+and follow the bootstrap in `CLAUDE.md` to reproduce the whole setup. Every
+script self-locates from its own path, so nothing here hardcodes where it
+lives — set `KVM_FRIENDS` to wherever you clone it (e.g. `export
+KVM_FRIENDS=$HOME/kvm-friends` in your shell rc) and every command in this
+doc and in `CLAUDE.md` works unchanged. Only recipes and network configs
+are versioned — VM disks, cloud-init seeds, console passwords, and the
+base image are gitignored and stay local.
 
 ## Where this lives, and why
 
-On Carlos's host the folder is `/disk/1/cnetto/kvm`, on the secondary NVMe
-(a 512 GB Bestoss GM888) rather than the primary one (a 1 TB Samsung 990
-PRO). **That is deliberate: it is the smaller and slower of the two drives,
-and these VMs are not mission critical.** They are a favour for friends, so
-they get the cheaper disk, and the fast drive stays free for Carlos's own
-work. Keeping the VMs off the primary NVMe also means their I/O never
-competes with the host's.
+This host (`reliablesite`, a colo box) is a single-disk machine: one 1.8 TB
+NVMe, one LVM root volume, nothing else to segregate VMs onto. The folder
+is `$KVM_FRIENDS` (`$HOME/kvm-friends` on this particular host), and VM
+disks share that same volume with the host OS — there's no dedicated
+secondary drive here.
 
 The trade-offs are accepted, not overlooked:
 
-- **Less headroom.** ~445 GB free here versus ~754 GB on the primary disk.
-  Disks are thin-provisioned 256 GB each, so two VMs could in principle
-  overcommit this drive. Actual usage is a few GB per VM; check `df -h
-  /disk/1` before adding a third VM or letting one grow large.
-- **Lower endurance and speed.** A budget drive. Fine for VMs that mostly
-  idle; do not move anything latency-sensitive or write-heavy here.
-- **No RAID, no backups.** If this drive dies, the VMs are gone. That is
-  acceptable because a VM is reproducible: `create-vm.sh` rebuilds one from
-  scratch in a couple of minutes. Friends should not keep the only copy of
-  anything they care about inside their VM — tell them so at handoff.
+- **Shared capacity.** Disks are thin-provisioned 256 GB each; check `df -h
+  /` before adding another VM or letting one grow large — usage is
+  typically a few GB per VM, well under the volume's headroom, but it's
+  shared with the host, not a reserved slice.
+- **No RAID, no backups.** One disk. If it dies, the VMs (and the host)
+  are gone. That's acceptable because a VM is reproducible: `create-vm.sh`
+  rebuilds one from scratch in a couple of minutes. Friends should not
+  keep the only copy of anything they care about inside their VM — tell
+  them so at handoff.
 
-If a VM ever *does* become important, move it to the primary disk following
+If this ever moves to a host with a separate disk worth using, follow
 "Moving the folder to another disk" in `CLAUDE.md` — never by symlinking,
 which leaves the domain XML pointing at a path that does not exist.
 
@@ -132,7 +133,7 @@ admin he can always access the disk/console. That's inherent to hosting.
 The easy way — an interactive list where you pick a VM and press a key:
 
 ```bash
-cd /disk/1/cnetto/kvm
+cd "$KVM_FRIENDS"
 ./vm-tui.py
 ```
 
@@ -168,19 +169,17 @@ virsh --connect qemu:///system autostart <vm-name>  # start on host boot (see no
 # Destroy a VM completely (irreversible):
 virsh --connect qemu:///system destroy <vm-name>        # force power-off (if running)
 virsh --connect qemu:///system undefine <vm-name>       # remove definition
-rm /disk/1/cnetto/kvm/<vm-name>.qcow2 \
-   /disk/1/cnetto/kvm/<vm-name>-seed.img \
-   /disk/1/cnetto/kvm/<vm-name>-console-password.txt    # delete disk, seed, password
+rm "$KVM_FRIENDS"/<vm-name>.qcow2 \
+   "$KVM_FRIENDS"/<vm-name>-seed.img \
+   "$KVM_FRIENDS"/<vm-name>-console-password.txt    # delete disk, seed, password
 ssh-keygen -R <vm-ip>   # forget its host key, or the next VM reusing the IP
                         # triggers a "HOST IDENTIFICATION CHANGED" warning
 ```
 
-Autostart is currently **off** for every VM, which is what you want while
-the disks live on `/disk/1`: libvirtd could otherwise try to start a VM
-before that filesystem is mounted. If you ever enable it, make sure the
-mount is ordered before `libvirtd.service` (`/disk/1` is mounted from
-`/etc/fstab` by UUID, so add `x-systemd.before=libvirtd.service` to its
-mount options).
+Autostart is currently **off** for every VM — nothing starts on its own
+after a host reboot, by design, so a crash or maintenance reboot doesn't
+silently bring VMs back up unattended. Enable it per VM with `virsh
+autostart <vm-name>` if you want the opposite.
 
 ---
 
