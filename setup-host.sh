@@ -102,4 +102,53 @@ else
   curl -fsSL "$BASE_URL/SHA256SUMS" | sha256sum -c --ignore-missing
 fi
 
-info "Done. vm-tui.py will build its own env on first ./vm-tui.py run."
+
+# ---- 4. Verify -------------------------------------------------------------
+# Everything above is guarded to no-op when already satisfied, which makes
+# failures easy to miss. Confirm the end state explicitly instead of trusting
+# that no step printed an error.
+info "Verifying"
+ok=1
+if [ "$(uname -s)" != Darwin ]; then
+  for c in qemu-system-x86_64 qemu-img virsh virt-install cloud-localds setfacl; do
+    if command -v "$c" >/dev/null 2>&1; then
+      echo "  ok: $c"
+    else
+      echo "  MISSING: $c" >&2
+      ok=0
+    fi
+  done
+  if id -nG "$USER" | grep -qw libvirt; then
+    echo "  ok: $USER in libvirt group"
+  else
+    echo "  MISSING: $USER not in libvirt group (log out/in after this run)" >&2
+    ok=0
+  fi
+  if getfacl -p "$PWD" 2>/dev/null | grep -q '^user:libvirt-qemu:rwx'; then
+    echo "  ok: libvirt-qemu rwx on $PWD"
+  else
+    echo "  MISSING: libvirt-qemu lacks rwx on $PWD" >&2
+    ok=0
+  fi
+  if [ -f "$BASE_IMG" ]; then
+    echo "  ok: base image present ($BASE_IMG)"
+  else
+    echo "  MISSING: base image ($BASE_IMG)" >&2
+    ok=0
+  fi
+fi
+for c in uv brew; do
+  if command -v "$c" >/dev/null 2>&1; then
+    echo "  ok: $c"
+  else
+    echo "  MISSING: $c" >&2
+    ok=0
+  fi
+done
+
+if [ "$ok" = 1 ]; then
+  info "Done. vm-tui.py will build its own env on first ./vm-tui.py run."
+else
+  info "Done, but some items above are still missing — see MISSING lines."
+  exit 1
+fi

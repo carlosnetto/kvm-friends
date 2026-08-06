@@ -4,11 +4,13 @@
 # Usage: ./create-vm.sh [vm-name] [login] ['ssh-ed25519 AAAA... comment'] \
 #                        [tskey] [mem-mib] [disk-gib]
 # Missing name/login/key are prompted for. The 4th (Tailscale pre-auth key)
-# is optional: without it, Tailscale is installed over SSH and the login
-# URL printed for the friend to approve on their own account. Pass '' to
-# skip it explicitly (e.g. when scripting). The 5th (RAM, in MiB) defaults
-# to 16384 — fixed for the VM's life, no ballooning (see CLAUDE.md). The
-# 6th (disk, in GiB) defaults to 256.
+# is optional: without it, Tailscale is only installed over SSH — bringing
+# it up is a manual step for Carlos afterwards (see "Tailscale (manual
+# path)" in CLAUDE.md), since `tailscale up` needs an interactive login URL
+# that isn't reliable to scrape from a backgrounded, non-pty SSH command.
+# Pass '' to skip it explicitly (e.g. when scripting). The 5th (RAM, in
+# MiB) defaults to 16384 — fixed for the VM's life, no ballooning (see
+# CLAUDE.md). The 6th (disk, in GiB) defaults to 256.
 set -euo pipefail
 # readlink -f: resolve symlinks so $PWD below is the real folder. Invoked via a
 # symlink, bash keeps the logical path and virt-install would record that path
@@ -23,7 +25,11 @@ BASE_IMG=noble-server-cloudimg-amd64.img
 MY_KEY_FILE=$HOME/.ssh/id_ed25519.pub
 
 # ---- preconditions --------------------------------------------------------
-[ -f "$BASE_IMG" ]    || err "base image missing — run the bootstrap in CLAUDE.md"
+if [ ! -f "$BASE_IMG" ]; then
+  info "Base image missing — running setup-host.sh to fetch it"
+  ./setup-host.sh
+  [ -f "$BASE_IMG" ] || err "base image still missing after setup-host.sh — check for errors above"
+fi
 [ -f "$MY_KEY_FILE" ] || err "$MY_KEY_FILE not found"
 V nwfilter-dumpxml isolate-guest >/dev/null 2>&1 \
   || err "nwfilter 'isolate-guest' missing — run the one-time setup in CLAUDE.md"
@@ -168,14 +174,12 @@ if [ -n "$TSKEY" ]; then
   done
   echo "    Tailscale IP: ${TSIP:-not joined yet — check 'sudo tailscale status' in the VM}"
 else
-  info "Installing Tailscale"
+  info "Installing Tailscale (not bringing it up — that's a manual step)"
   "${SSH[@]}" "curl -fsSL https://tailscale.com/install.sh | sh" >/dev/null 2>&1
-  URL=$("${SSH[@]}" "sudo systemctl enable --now tailscaled >/dev/null 2>&1; \
-                     nohup sudo tailscale up >/tmp/ts-up.log 2>&1 & sleep 8; cat /tmp/ts-up.log" \
-        | grep -o 'https://login\.tailscale\.com/[A-Za-z0-9/]*' | head -1)
-  echo
-  echo "  >>> Send this URL to the friend — they approve it on THEIR Tailscale account: <<<"
-  echo "      ${URL:-URL not captured — run 'sudo tailscale up' inside the VM}"
+  "${SSH[@]}" "sudo systemctl enable --now tailscaled" >/dev/null 2>&1
+  echo "    Installed. Bring it up when ready:"
+  echo "      ssh $FRIEND@$IP 'sudo tailscale up'"
+  echo "    then send the friend the printed login URL to approve on THEIR account."
 fi
 
 # ---- summary -----------------------------------------------------------------

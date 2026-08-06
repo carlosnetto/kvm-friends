@@ -26,7 +26,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select
 
 MEM_OPTIONS = [("2 GB", 2048), ("4 GB", 4096), ("8 GB", 8192),
-               ("16 GB", 16384), ("24 GB", 24576)]
+               ("16 GB", 16384), ("24 GB", 24576), ("32 GB", 32768)]
 DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
 
 VIRSH = ["virsh", "--connect", "qemu:///system"]

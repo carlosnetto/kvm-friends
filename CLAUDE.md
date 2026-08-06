@@ -62,8 +62,9 @@ setfacl -m u:libvirt-qemu:rwx .
 2. Friend's login name (lowercase).
 3. Friend's SSH **public** key.
 4. Optional: friend's Tailscale pre-auth key (`tskey-...`). If provided,
-   install Tailscale via cloud-init and join automatically; if not, Carlos
-   does it manually after first boot (see Tailscale section below).
+   install Tailscale via cloud-init and join automatically; if not,
+   `create-vm.sh` still installs Tailscale over SSH, but Carlos has to
+   bring it up manually after first boot (see Tailscale section below).
 
 Also include Carlos's public key (`~/.ssh/id_ed25519.pub`) in the VM —
 temporary, removed at handoff.
@@ -145,8 +146,10 @@ What `isolate-guest.xml` does:
 
 Automated: `./create-vm.sh [name] [login] ['ssh-... key'] [tskey] [mem-mib]
 [disk-gib]` runs everything in this section plus the after-boot checks and
-Tailscale setup (prompts for missing name/login/key; RAM and disk default
-to 16384 MiB / 256 GiB). The manual steps below remain the reference.
+Tailscale install (prompts for missing name/login/key; RAM and disk default
+to 16384 MiB / 256 GiB; if the base image is missing it runs
+`setup-host.sh` first to fetch it rather than erroring out). The manual
+steps below remain the reference.
 
 ```bash
 cd ~/kvm-friends        # this repo, wherever it is cloned
@@ -277,8 +280,12 @@ virsh --connect qemu:///system start ${NAME}
 
 ## Tailscale (manual path, when no pre-auth key)
 
-1. SSH in with Carlos's key, run:
-   `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up`
+`create-vm.sh` already installs and enables Tailscale over SSH in this
+case — it stops short of bringing it up, since `tailscale up` prints an
+interactive login URL that isn't reliable to scrape from a backgrounded,
+non-pty SSH command. Only the "up" step is manual:
+
+1. SSH in with Carlos's key, run: `sudo tailscale up`
 2. Send the friend the printed login URL; they approve it in their browser
    against **their own** Tailscale account.
 
@@ -444,3 +451,16 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   Validated end to end on this host: recreated `vm-tk`, isolation check
   passed (192.168.122.1 and the real public gateway 103.195.102.1 both
   blocked, internet still OK), Tailscale joined and reachable.
+- 2026-08-06: three small robustness fixes after an audit turned up gaps
+  between the scripts and what had actually been done by hand on this
+  host. `setup-host.sh` gained a final verification pass (checks every
+  tool, the `libvirt` group, the `libvirt-qemu` ACL, and the base image,
+  printing explicit `ok:`/`MISSING:` lines) since every step was
+  already guarded to no-op silently, which made real failures easy to
+  miss. `create-vm.sh` now runs `setup-host.sh` itself if the base image
+  is missing instead of erroring out and pointing at this doc. And the
+  no-pre-auth-key Tailscale path was simplified: `create-vm.sh` now only
+  installs and enables Tailscale over SSH — it no longer also tries to
+  background `tailscale up` and scrape the login URL from the result,
+  since that capture was unreliable over a non-pty SSH command; bringing
+  it up is now always the documented manual step below.
