@@ -1,0 +1,23 @@
+# This repository is PUBLIC. The API key it uses is equivalent to root on the
+# server (see README.md § 2.1 — the root password is readable through a GET, and
+# § 2.2 — one POST reinstalls the OS), so nothing key-shaped may ever land here.
+*.key
+*.tok
+*.jwt
+.rs.key
+rs.key
+rs.tok
+secrets*
+.env
+
+# Raw API responses contain the server's ROOT PASSWORD in cleartext. Never commit
+# captured output.
+*.response.json
+*-raw.json
+out/
+tmp/
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
