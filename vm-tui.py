@@ -25,9 +25,10 @@ from textual.containers import Grid, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select
 
-MEM_OPTIONS = [("2 GB", 2048), ("4 GB", 4096), ("8 GB", 8192),
-               ("16 GB", 16384), ("24 GB", 24576), ("32 GB", 32768)]
+MEM_OPTIONS = [("512 MB", 512), ("1 GB", 1024), ("2 GB", 2048), ("4 GB", 4096),
+               ("8 GB", 8192), ("16 GB", 16384), ("24 GB", 24576), ("32 GB", 32768)]
 DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
+VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8)]
 
 VIRSH = ["virsh", "--connect", "qemu:///system"]
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -159,6 +160,8 @@ class CreateVM(ModalScreen[dict | None]):
             yield Input(placeholder="tskey-...", id="tskey")
             yield Label("RAM (fixed, no ballooning)")
             yield Select(MEM_OPTIONS, value=16384, id="mem", allow_blank=False)
+            yield Label("vCPUs (fixed)")
+            yield Select(VCPU_OPTIONS, value=8, id="vcpus", allow_blank=False)
             yield Label("Disk")
             yield Select(DISK_OPTIONS, value=256, id="disk", allow_blank=False)
             with Horizontal(id="buttons"):
@@ -174,13 +177,14 @@ class CreateVM(ModalScreen[dict | None]):
         key = self.query_one("#key", Input).value.strip()
         tskey = self.query_one("#tskey", Input).value.strip()
         mem = self.query_one("#mem", Select).value
+        vcpus = self.query_one("#vcpus", Select).value
         disk = self.query_one("#disk", Select).value
         if not name or not login or not key:
             self.app.notify("VM name, login, and SSH key are required",
                              severity="error", timeout=6)
             return
         self.dismiss({"name": name, "login": login, "key": key,
-                      "tskey": tskey, "mem": mem, "disk": disk})
+                      "tskey": tskey, "mem": mem, "vcpus": vcpus, "disk": disk})
 
 
 class ConfirmDestroy(ModalScreen[bool]):
@@ -348,14 +352,14 @@ class VMApp(App):
 
     @work(thread=True, group="create")
     def run_create(self, name: str, login: str, key: str, tskey: str,
-                   mem: int, disk: int) -> None:
+                   mem: int, vcpus: int, disk: int) -> None:
         script = os.path.join(HERE, "create-vm.sh")
         self.call_from_thread(
             self.notify, f"Creating {name} — this takes a few minutes "
             "(boot, SSH, isolation check, Tailscale)...", timeout=8)
         try:
             proc = subprocess.Popen(
-                [script, name, login, key, tskey, str(mem), str(disk)],
+                [script, name, login, key, tskey, str(mem), str(disk), str(vcpus)],
                 cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1)
         except FileNotFoundError:

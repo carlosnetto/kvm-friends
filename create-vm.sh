@@ -2,7 +2,7 @@
 # create-vm.sh — create a friend VM exactly as documented in CLAUDE.md.
 #
 # Usage: ./create-vm.sh [vm-name] [login] ['ssh-ed25519 AAAA... comment'] \
-#                        [tskey] [mem-mib] [disk-gib]
+#                        [tskey] [mem-mib] [disk-gib] [vcpus]
 # Missing name/login/key are prompted for. The 4th (Tailscale pre-auth key)
 # is optional: without it, Tailscale is only installed over SSH — bringing
 # it up is a manual step for Carlos afterwards (see "Tailscale (manual
@@ -10,7 +10,8 @@
 # that isn't reliable to scrape from a backgrounded, non-pty SSH command.
 # Pass '' to skip it explicitly (e.g. when scripting). The 5th (RAM, in
 # MiB) defaults to 16384 — fixed for the VM's life, no ballooning (see
-# CLAUDE.md). The 6th (disk, in GiB) defaults to 256.
+# CLAUDE.md). The 6th (disk, in GiB) defaults to 256. The 7th (vCPUs)
+# defaults to 8 — fixed for the VM's life, same as RAM.
 set -euo pipefail
 # readlink -f: resolve symlinks so $PWD below is the real folder. Invoked via a
 # symlink, bash keeps the logical path and virt-install would record that path
@@ -45,10 +46,12 @@ if [ $# -lt 4 ] && [ -t 0 ]; then
 fi
 MEM=${5:-16384}
 DISK=${6:-256}
+VCPUS=${7:-8}
 
 [[ $NAME   =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || err "VM name: lowercase letters/digits/hyphens only"
 [[ $MEM    =~ ^[0-9]+$ ]] && [ "$MEM" -ge 512 ] || err "RAM (MiB): must be a positive integer >= 512"
 [[ $DISK   =~ ^[0-9]+$ ]] && [ "$DISK" -ge 8 ]  || err "Disk (GiB): must be a positive integer >= 8"
+[[ $VCPUS  =~ ^[0-9]+$ ]] && [ "$VCPUS" -ge 1 ] || err "vCPUs: must be a positive integer >= 1"
 [[ $FRIEND =~ ^[a-z][a-z0-9_-]{0,31}$   ]] || err "login: lowercase, must start with a letter"
 [[ $FRIEND_KEY == *PRIVATE* ]] && err "that looks like a PRIVATE key — never accept those"
 [[ $FRIEND_KEY =~ ^(ssh-ed25519|ssh-rsa|ecdsa-|sk-ssh|sk-ecdsa) ]] \
@@ -116,12 +119,12 @@ printf 'instance-id: %s-001\nlocal-hostname: %s\n' "$NAME" "$NAME" > "$TMP/meta-
 cloud-localds "$NAME-seed.img" "$TMP/user-data" "$TMP/meta-data"
 
 # ---- create ----------------------------------------------------------------
-info "Creating VM '$NAME' (8 vCPU, ${MEM} MiB fixed RAM, ${DISK} GB disk, isolated network)"
+info "Creating VM '$NAME' (${VCPUS} vCPU, ${MEM} MiB fixed RAM, ${DISK} GB disk, isolated network)"
 virt-install --connect qemu:///system \
   --name "$NAME" \
   --memory "$MEM" \
   --memballoon model=none \
-  --vcpus 8 \
+  --vcpus "$VCPUS" \
   --disk "path=$PWD/$NAME.qcow2,format=qcow2,bus=virtio" \
   --disk "path=$PWD/$NAME-seed.img,format=raw,bus=virtio" \
   --import \

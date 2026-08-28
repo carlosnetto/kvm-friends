@@ -32,7 +32,8 @@ this file.
 - RAM: every VM gets a fixed 16 GB, no ballooning (`--memballoon
   model=none`) — real memory, not overcommitted. See "Memory management"
   below for resizing.
-- CPU: every VM gets 8 vCPUs, fixed (the host has 32 threads).
+- CPU: fixed vCPUs, chosen at creation time (1, 4, or 8 — the host has 32
+  threads). Defaults to 8.
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
 - Use `--connect qemu:///system` for all virsh/virt-install commands.
@@ -153,11 +154,11 @@ What `isolate-guest.xml` does:
 ## Recipe
 
 Automated: `./create-vm.sh [name] [login] ['ssh-... key'] [tskey] [mem-mib]
-[disk-gib]` runs everything in this section plus the after-boot checks and
-Tailscale install (prompts for missing name/login/key; RAM and disk default
-to 16384 MiB / 256 GiB; if the base image is missing it runs
-`setup-host.sh` first to fetch it rather than erroring out). The manual
-steps below remain the reference.
+[disk-gib] [vcpus]` runs everything in this section plus the after-boot
+checks and Tailscale install (prompts for missing name/login/key; RAM
+defaults to 16384 MiB, disk to 256 GiB, vCPUs to 8; if the base image is
+missing it runs `setup-host.sh` first to fetch it rather than erroring
+out). The manual steps below remain the reference.
 
 ```bash
 cd "$KVM_FRIENDS"
@@ -166,6 +167,7 @@ FRIEND=joao             # login name
 FRIEND_KEY='ssh-ed25519 AAAA... friend'
 MEM=16384               # RAM, MiB
 DISK=256                # disk, GiB
+VCPUS=8                 # vCPUs (1, 4, or 8 in the TUI; any positive integer by hand)
 
 cp noble-server-cloudimg-amd64.img ${NAME}.qcow2
 qemu-img resize ${NAME}.qcow2 ${DISK}G
@@ -226,7 +228,7 @@ virt-install --connect qemu:///system \
   --name ${NAME} \
   --memory ${MEM} \
   --memballoon model=none \
-  --vcpus 8 \
+  --vcpus ${VCPUS} \
   --disk path=$PWD/${NAME}.qcow2,format=qcow2,bus=virtio \
   --disk path=$PWD/${NAME}-seed.img,format=raw,bus=virtio \
   --import \
@@ -275,9 +277,10 @@ soft ceiling.
 
 ## CPU management
 
-Every VM has 8 fixed vCPUs. There is no time cap within them — a VM can
-run all 8 at 100%; with 32 host threads that's acceptable. Changing the
-count needs a shutdown:
+Every VM gets a fixed vCPU count chosen at creation time (1, 4, or 8 in the
+TUI; defaults to 8). There is no time cap within them — a VM can run all
+of its vCPUs at 100%; with 32 host threads that's acceptable even at 8.
+Changing the count later needs a shutdown:
 
 ```bash
 virsh --connect qemu:///system shutdown ${NAME}    # wait for "shut off"
@@ -492,3 +495,8 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   box) turned out to be a single 1.8 TB NVMe with one LVM root volume,
   no secondary drive at all, so that whole rationale was stale and has
   been rewritten to match.
+- 2026-08-28: vCPU count made selectable at creation time (1, 4, or 8;
+  still defaults to 8) instead of hardcoded — `create-vm.sh` gained a 7th
+  positional argument, `vm-tui.py`'s create form gained a vCPU select.
+  RAM options in the TUI extended downward (512 MB, 1 GB, 2 GB, 4 GB added
+  below the existing 8/16/24/32 GB) for smaller/test VMs.
