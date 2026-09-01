@@ -11,6 +11,10 @@ user-data
 meta-data
 # Personal session notes
 claude.back
+# Domain XML dumps from a host-to-host VM move (vm-*.xml); the tracked
+# isolate-guest.xml / default-net.xml are deliberately not matched.
+vm-*.xml
+vm-*.xml.orig
 
 # Python bytecode from vm-tui.py
 __pycache__/

@@ -376,6 +376,158 @@ boots, there is provably no fallback to the old path. Only then delete
 the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
 `/etc/apparmor.d/libvirt/libvirt-<uuid>.files` from the XML on each start.
 
+## Moving a VM to another host
+
+Different from moving the *folder*: here one VM leaves this host for a
+different machine, and everything inside it must survive — same
+filesystem, same SSH host keys, same **Tailscale identity**
+(`/var/lib/tailscale/tailscaled.state` lives on the disk), so the friend
+keeps the same 100.x address and notices nothing but the downtime. What is
+*not* preserved is RAM state: running processes, open connections, uptime.
+
+Shut the VM down cleanly — **never move a `virsh save` / `managedsave`
+state file.** Saved RAM state is tied to the exact QEMU build, machine type
+and CPU flags, and will not restore reliably elsewhere. A cold boot is
+precisely what makes this portable, and it is also why `host-passthrough`
+(what `virt-install` records here) is harmless across different CPUs: the
+guest re-detects the CPU at boot.
+
+Four things travel, not just the disk:
+
+| Item | Why |
+|---|---|
+| `<name>.qcow2` | The machine itself. |
+| `<name>-seed.img` | The domain XML lists it as a **second disk** — the VM will not start without it. Copy it **unchanged**: cloud-init matches the same `instance-id` and skips first-boot setup. A *new* seed would re-run cloud-init and re-add Carlos's key. |
+| `<name>-console-password.txt` | Not needed to boot; you just want it on the new host. |
+| The domain XML | Not kept anywhere by `create-vm.sh` — dump it. |
+
+**Dump and redefine the XML; do not rebuild the domain with
+`virt-install`.** A fresh `virt-install` generates a new MAC, and
+cloud-init baked the original MAC into the guest's netplan as a `match:`
+rule — a new MAC means the interface does not match and the VM boots with
+**no network**, recoverable only from the serial console. The XML carries
+the MAC and the UUID (AppArmor regenerates its profile from the XML on
+start, so there is nothing to do there).
+
+Check these on the destination *before* copying — each one is a start
+failure if missing:
+
+```bash
+virsh --connect qemu:///system nwfilter-list | grep isolate-guest  # else: ./setup-network.sh
+virsh --connect qemu:///system net-list --all | grep default
+virsh --connect qemu:///system capabilities | grep -o 'pc-q35-[a-z0-9.]*' | sort -u
+virsh --connect qemu:///system dominfo <name>      # must fail: no name collision
+getfacl -p . | grep libvirt-qemu                   # else: setfacl -m u:libvirt-qemu:rwx .
+df -h .                                            # vs. qemu-img info on the source
+```
+
+The machine type matters: domains here record `pc-q35-noble`, an
+**Ubuntu-specific alias**. A destination on another distro or an older
+QEMU will not have it, and the domain fails to start — edit `<type
+machine=...>` to a supported version from the `capabilities` list above.
+Note `setup-network.sh` refuses to run while any VM is running, so if the
+destination already hosts VMs, that setup has to predate them.
+
+On the source (VM already `shut off`):
+
+```bash
+cd "$KVM_FRIENDS"; NAME=vm-anac
+virsh --connect qemu:///system dumpxml --inactive $NAME > /tmp/$NAME.xml
+qemu-img info  $NAME.qcow2      # confirm there is NO "backing file:" line
+qemu-img check $NAME.qcow2      # cheap insurance before a long copy
+```
+
+`--inactive` matters: dumping a *running* domain bakes this host's expanded
+CPU features into the XML.
+
+Copy host-to-host rather than via a laptop. Neither host needs standing SSH
+trust to the other — forward a throwaway agent, which leaves nothing behind
+on either box:
+
+```bash
+eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519
+trap 'ssh-agent -k' EXIT
+ssh -A cnetto@<src> "scp -p $NAME.qcow2 $NAME-seed.img \
+    $NAME-console-password.txt /tmp/$NAME.xml cnetto@<dst>:/path/to/kvm-friends/"
+```
+
+`rsync -aHAX --sparse` is better when it is available on **both** ends
+(rsync-over-ssh runs rsync remotely too) — reliablesite does not have it.
+`scp -p` is the fallback and preserves the `600` on the password file;
+sparseness is not a concern in practice, since these qcow2 files are
+compact rather than hole-punched (`du` and `du --apparent-size` agree).
+Verify with `sha256sum` on both sides afterwards — that, not the copy tool,
+is the integrity guarantee.
+
+On the destination:
+
+```bash
+cd "$KVM_FRIENDS"
+sed -i "s#/old/path/to/kvm-friends/#$PWD/#g" $NAME.xml   # absolute disk paths
+virsh --connect qemu:///system define $NAME.xml
+virsh --connect qemu:///system domblklist $NAME          # confirm new paths
+virsh --connect qemu:///system start $NAME
+```
+
+Resizing while it is off costs nothing — the XML is right there, and a cold
+boot means no `setvcpus`/`setmem` dance. Edit `<vcpu placement='static'>`
+or `<memory>`/`<currentMemory>` (KiB) before `define`.
+
+Verify: `domifaddr` shows a **new** 192.168.122.x lease (irrelevant —
+access is over Tailscale), and from another tailnet node the VM answers on
+its *same* Tailscale IP.
+
+### Optional: let the *new* host log in to the guest
+
+`create-vm.sh` put the **old** host's `~/.ssh/id_ed25519.pub` in the
+friend's `authorized_keys`. Unless both hosts share a key, the new host
+cannot SSH into the VM after the move — sshd answers and then rejects it:
+
+```bash
+# From the new host, once the VM has an IP:
+ssh -o BatchMode=yes <friend>@<new-192.168.122.x> true && echo "already trusted"
+# 'Permission denied (publickey)' = the guest does not know this host's key.
+```
+
+This is **optional**, and often the correct answer is to leave it alone:
+
+- **Before handoff**, Carlos still needs a way in for maintenance — worth
+  fixing, since otherwise the only access left is the serial console.
+- **After handoff** the friend has already run
+  `~/REMOVE_TK_SSH_PUB_KEY.sh` and the old key is gone by design. Adding
+  the new host's key re-grants Carlos SSH access to a machine that was
+  deliberately handed over. Do it only with the friend's agreement, or not
+  at all — the VM does not need host SSH to work, and Tailscale is
+  unaffected either way.
+
+Do **not** try to fix this by editing the seed: cloud-init sees the same
+`instance-id` and never re-reads it, so the old key baked into
+`<name>-seed.img` is inert.
+
+The reliable path is the serial console — it needs no key and no network,
+and the console password came across with the other files:
+
+```bash
+virsh --connect qemu:///system console <name>       # detach: Ctrl+]
+# log in as <friend>, password from <name>-console-password.txt, then paste
+# the NEW host's ~/.ssh/id_ed25519.pub:
+#   echo 'ssh-ed25519 AAAA... cnetto@newhost' >> ~/.ssh/authorized_keys
+```
+
+Asking the friend to append it over their own Tailscale session works too,
+and is the better route once the machine is theirs.
+
+Two notes: host → guest SSH works at all only because `isolate-guest` drops
+`state='NEW'` in the guest→host direction, so the host's connection and its
+replies are fine (see "Network isolation"). And if a previous VM on this
+host used the same lease, clear the stale entry first — `ssh-keygen -R
+<new-ip>` — or ssh refuses with a host-key warning.
+
+**Never run both copies.** Two machines sharing one Tailscale node key
+fight over the identity, and they share SSH host keys too. Only once the
+new one is verified, on the old host: `virsh undefine <name>`, then move
+its files aside as a cold backup rather than leaving them startable.
+
 ## History
 
 - 2026-07-08: recipe validated end to end with a test VM (`ubuntu-vm`,
@@ -500,3 +652,41 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
   positional argument, `vm-tui.py`'s create form gained a vCPU select.
   RAM options in the TUI extended downward (512 MB, 1 GB, 2 GB, 4 GB added
   below the existing 8/16/24/32 GB) for smaller/test VMs.
+- 2026-08-31: first host-to-host VM move, and the "Moving a VM to another
+  host" section above written from it. `vm-anac` moved from `reliablesite`
+  to `msa1-01-ord` (where the repo lives at `$HOME/Git/kvm-friends`, not
+  `$HOME/kvm-friends` — the path rewrite is why the domain XML has to be
+  edited, not just copied). Cold move: VM shut off first, `dumpxml
+  --inactive`, then 8.4 GB of qcow2 + seed + console password + XML copied
+  **host to host** with `scp -p` over the tailnet (~5 min). Two practical
+  findings: reliablesite has no `rsync` (and rsync-over-ssh needs it on
+  both ends), and neither host has SSH trust to the other — solved by
+  forwarding a throwaway `ssh-agent` from the laptop (`ssh -A`), which
+  moves the bytes directly between the two boxes without a laptop round
+  trip and leaves no new `authorized_keys` entry behind. All four files
+  verified by matching sha256 on both sides; `scp -p` preserved the 600 on
+  the console password. On the destination *only*, vCPUs were reduced 8 → 2
+  by editing `<vcpu placement='static'>` before `define` — free while the
+  domain is off, no `setvcpus` dance. UUID, MAC (`52:54:00:27:a0:68`),
+  8 GiB memory, `pc-q35-noble` and the `isolate-guest` filterref all
+  preserved by redefining the dumped XML rather than re-running
+  `virt-install`; the MAC matters most, since cloud-init pinned it into the
+  guest's netplan `match:` and a fresh `virt-install` MAC would have booted
+  the VM with no network at all. Both hosts happened to run identical
+  libvirt 10.0.0 / QEMU 8.2.2 on AMD Zen CPUs (EPYC 4545P → Ryzen 9
+  9950X), so `host-passthrough` and the Ubuntu-specific `pc-q35-noble`
+  alias were both non-issues here — neither is guaranteed on a future move,
+  hence the destination pre-flight checks in the section above. Also added
+  a narrow `vm-*.xml` gitignore rule, since the documented procedure now
+  drops domain XML dumps in the repo folder (`*.xml` would have swallowed
+  the tracked `isolate-guest.xml` and `default-net.xml`). vm-anac booted on
+  msa1-01-ord first try, taking a fresh lease (192.168.122.171) on the
+  preserved MAC — proof the netplan `match:` concern is real and that
+  redefining the XML is what avoids it. One gap surfaced only after boot,
+  now written up as "Optional: let the new host log in to the guest": the
+  two hosts have different `id_ed25519` keys, so the guest's
+  `authorized_keys` still trusted only `cnetto@reliablesite` and the new
+  host got `Permission denied (publickey)`. Nothing is broken by that —
+  the VM and its Tailscale access are unaffected — but it means a moved VM
+  silently loses host-side SSH unless the key is added over the serial
+  console. Destroying the original left to Carlos.
