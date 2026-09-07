@@ -289,6 +289,30 @@ virsh --connect qemu:///system setvcpus ${NAME} 16 --config
 virsh --connect qemu:///system start ${NAME}
 ```
 
+## Editing a VM's CPU and RAM
+
+`./vm-tui.py` does both in one place: select a VM and press `e`. The form
+prefills with the VM's current values and writes them with the same
+`--config` virsh calls documented in the two sections above; disk is shown
+but not editable (growing it needs `qemu-img resize` plus a partition/fs
+grow inside the guest, which is not a one-keystroke operation).
+
+**The VM must be `shut off`** — `e` refuses otherwise. This is not
+squeamishness: there is no balloon and no CPU hotplug here, so a `--config`
+edit on a running domain applies only at the next boot and the table would
+report a size the guest isn't running on. Shut down with `h` first; the
+change takes effect on the next `s`.
+
+Order matters within each pair, and the TUI picks it based on the
+direction: `<memory>` is a ceiling for `<currentMemory>` (likewise
+`--maximum` for vCPUs), so it **raises the ceiling before the value** when
+growing and **lowers the value before the ceiling** when shrinking. The
+other order asks libvirt for a state where the value exceeds its ceiling.
+A failing step aborts the rest rather than leaving a half-applied config.
+
+Sizing up is still bounded by real hardware — see the `free -h` warning
+under "Memory management". The TUI does not check this for you.
+
 ## Tailscale (manual path, when no pre-auth key)
 
 `create-vm.sh` already installs and enables Tailscale over SSH in this
@@ -311,8 +335,9 @@ non-pty SSH command. Only the "up" step is manual:
 ## Day-to-day: starting and stopping VMs
 
 `./vm-tui.py` is the interactive front end — a list of every VM with
-single-key start (`s`), graceful shutdown (`h`), force off (`f`, confirmed)
-and serial console (`c`). It is a Textual app run through uv: the PEP 723
+single-key start (`s`), graceful shutdown (`h`), force off (`f`, confirmed),
+serial console (`c`) and resize (`e`, shut-off VMs only — see "Editing a
+VM's CPU and RAM" above). It is a Textual app run through uv: the PEP 723
 metadata block at the top of the script declares `requires-python` and
 `textual`, and `uv run` builds a cached environment on first use, so there
 is nothing to pip-install. A new host needs `uv` and Python 3.13
@@ -690,3 +715,19 @@ its files aside as a cold backup rather than leaving them startable.
   the VM and its Tailscale access are unaffected — but it means a moved VM
   silently loses host-side SSH unless the key is added over the serial
   console. Destroying the original left to Carlos.
+- 2026-09-07: `vm-tui.py` gained `e` (edit VM) — resize a **shut-off** VM's
+  vCPUs and RAM from the same selects the create form uses; disk shown but
+  not editable. Gated on `shut off` because there is no balloon and no CPU
+  hotplug here, so `--config` edits only land at the next boot. Two details
+  worth keeping: the option list folds in the VM's *current* value when it
+  isn't one of the menu sizes (Textual's `Select` raises on a value outside
+  its options, and real VMs sit on off-menu sizes — `vm-anac` runs 2 vCPUs
+  after the host move), and the virsh pairs are ordered by direction, since
+  `<memory>`/`--maximum` is a ceiling for the value: ceiling-first when
+  growing, value-first when shrinking. Verified headlessly with
+  `App.run_test()` (refuses a running VM, prefills off-menu values, no-op
+  and cancel do nothing, step ordering correct in both directions, a failed
+  step aborts the rest) and end to end against libvirt by round-tripping
+  `vm-workspace-demo-circle` 4 vCPU/24 GB -> 1/2 GB -> back, with the
+  inactive XML diffing clean against a pre-change dump.
+

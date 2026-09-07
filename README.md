@@ -45,7 +45,7 @@ Versioned (in git):
 |---|---|
 | `setup-host.sh` | One-time host setup: installs the KVM/libvirt stack (apt) plus uv/Python 3.13 (brew), assuming a virgin machine. Idempotent. |
 | `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key, RAM, disk size), builds and boots it, runs the isolation check, sets up Tailscale. |
-| `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM and starts/stops them with single keys. Run `./vm-tui.py`; uv builds its environment on first run. |
+| `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM, starts/stops them with single keys, and resizes a shut-off VM's CPU and RAM (`e`). Run `./vm-tui.py`; uv builds its environment on first run. |
 | `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. Same data as `vm-tui.py`, for scripts and pipes. |
 | `destroy-vm.sh` | Destroys a VM and all its files (asks you to retype the name; `--yes` to skip). |
 | `setup-network.sh` | One-time network isolation setup: defines the nwfilter and replaces the default network. Computes this host's own subnet fresh each run. Refuses to run while a VM is running. |

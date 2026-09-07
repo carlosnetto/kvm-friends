@@ -5,8 +5,9 @@
 # ///
 """vm-tui.py — interactive console for the friend VMs.
 
-Lists every VM with its state, IP, CPUs, RAM and disk usage, and starts or
-stops them so you never have to remember a virsh incantation.
+Lists every VM with its state, IP, CPUs, RAM and disk usage, starts and stops
+them, and resizes a shut-off VM's CPU and RAM — so you never have to remember
+a virsh incantation.
 
     ./vm-tui.py
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -59,6 +61,20 @@ def human(n: int | None) -> str:
             return f"{v:.0f}{unit}" if unit in "BK" else f"{v:.1f}{unit}"
         v /= 1024
     return f"{v:.1f}P"
+
+
+def mem_label(mib: int) -> str:
+    return f"{mib} MB" if mib < 1024 else f"{mib / 1024:g} GB"
+
+
+def options_with(options: list[tuple[str, int]], value: int,
+                 label: Callable[[int], str]) -> list[tuple[str, int]]:
+    """Select refuses a value outside its own options, and a VM can legitimately
+    sit on a size this menu doesn't list — resized by hand, or moved in from
+    another host. Fold the current value in rather than crash on it."""
+    if any(v == value for _, v in options):
+        return options
+    return sorted(options + [(label(value), value)], key=lambda o: o[1])
 
 
 def disk_usage(name: str) -> int | None:
@@ -187,6 +203,55 @@ class CreateVM(ModalScreen[dict | None]):
                       "tskey": tskey, "mem": mem, "vcpus": vcpus, "disk": disk})
 
 
+class EditVM(ModalScreen[dict | None]):
+    """Resize a shut-off VM's CPU and RAM. Disk is deliberately not editable:
+    growing it needs qemu-img plus a resize inside the guest, which is not a
+    one-keystroke operation."""
+
+    CSS = """
+    EditVM { align: center middle; }
+    #box {
+        padding: 1 2; width: 66; height: auto; border: thick $accent;
+        background: $surface;
+    }
+    #box > Label { margin-top: 1; }
+    #buttons { margin-top: 1; height: 3; align: right middle; }
+    """
+
+    def __init__(self, name: str, vcpus: int, mem_mib: int, disk: str) -> None:
+        super().__init__()
+        self.vm_name = name
+        self.vcpus = vcpus
+        self.mem_mib = mem_mib
+        self.disk = disk
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Label(f"[b]Edit {self.vm_name}[/]  (currently shut off)")
+            yield Label("RAM (fixed, no ballooning)")
+            yield Select(options_with(MEM_OPTIONS, self.mem_mib, mem_label),
+                         value=self.mem_mib, id="mem", allow_blank=False)
+            yield Label("vCPUs (fixed)")
+            yield Select(options_with(VCPU_OPTIONS, self.vcpus, str),
+                         value=self.vcpus, id="vcpus", allow_blank=False)
+            yield Label(f"Disk: {self.disk} used — not editable here")
+            with Horizontal(id="buttons"):
+                yield Button("Apply", variant="success", id="apply")
+                yield Button("Cancel", variant="primary", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "apply":
+            self.dismiss(None)
+            return
+        mem = self.query_one("#mem", Select).value
+        vcpus = self.query_one("#vcpus", Select).value
+        if mem == self.mem_mib and vcpus == self.vcpus:
+            self.app.notify("nothing changed")
+            self.dismiss(None)
+            return
+        self.dismiss({"name": self.vm_name, "mem": mem, "vcpus": vcpus})
+
+
 class ConfirmDestroy(ModalScreen[bool]):
     """Irreversible: deletes the domain, disk, seed and console password."""
 
@@ -239,6 +304,7 @@ class VMApp(App):
         ("f", "force_off", "Force off"),
         ("c", "console", "Console"),
         ("n", "create_vm", "New"),
+        ("e", "edit_vm", "Edit"),
         ("d", "destroy_vm", "Destroy"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
@@ -381,6 +447,64 @@ class VMApp(App):
             self.call_from_thread(
                 self.notify, f"create-vm.sh failed for {name}:\n" +
                 "\n".join(tail[-6:]), severity="error", timeout=20)
+        self.refresh_vms()
+
+    def action_edit_vm(self) -> None:
+        vm = self.selected
+        if not vm:
+            return
+        # CPU and RAM are fixed at boot here — no hotplug, no balloon — so
+        # these are --config edits that only land on the next start. Requiring
+        # the domain to be off is what keeps the table honest about that.
+        if vm["state"] != "shut off":
+            self.notify(f"{vm['name']} must be shut off to edit "
+                        "— press 'h' for a clean shutdown first",
+                        severity="warning", timeout=8)
+            return
+        try:
+            cur_vcpus = int(vm["vcpu"])
+        except (TypeError, ValueError):
+            cur_vcpus = None
+        cur_mem = vm["max"] // (1024 * 1024) if vm["max"] else None
+        if cur_vcpus is None or cur_mem is None:
+            self.notify(f"can't read {vm['name']}'s current CPU/RAM",
+                        severity="error", timeout=8)
+            return
+
+        def done(result: dict | None) -> None:
+            if result:
+                self.run_edit(cur_vcpus=cur_vcpus, cur_mem=cur_mem, **result)
+
+        self.push_screen(
+            EditVM(vm["name"], cur_vcpus, cur_mem, human(vm["disk"])), done)
+
+    @work(thread=True, group="action")
+    def run_edit(self, name: str, vcpus: int, mem: int,
+                 cur_vcpus: int, cur_mem: int) -> None:
+        # Each pair is (ceiling, value) and the ceiling bounds the value, so
+        # raise the ceiling before the value and lower the value before the
+        # ceiling — the other order asks libvirt for a state it rejects.
+        steps: list[tuple[str, ...]] = []
+        if mem != cur_mem:
+            pair = [("setmaxmem", name, f"{mem}M", "--config"),
+                    ("setmem", name, f"{mem}M", "--config")]
+            steps += pair if mem > cur_mem else pair[::-1]
+        if vcpus != cur_vcpus:
+            pair = [("setvcpus", name, str(vcpus), "--maximum", "--config"),
+                    ("setvcpus", name, str(vcpus), "--config")]
+            steps += pair if vcpus > cur_vcpus else pair[::-1]
+        for step in steps:
+            ok, out = virsh(*step)
+            if not ok:
+                self.call_from_thread(
+                    self.notify, f"virsh {' '.join(step)} failed:\n{out}",
+                    severity="error", timeout=15)
+                self.refresh_vms()
+                return
+        self.call_from_thread(
+            self.notify,
+            f"{name}: now {vcpus} vCPU, {mem_label(mem)} — applies on next start",
+            severity="information", timeout=8)
         self.refresh_vms()
 
     def action_destroy_vm(self) -> None:
