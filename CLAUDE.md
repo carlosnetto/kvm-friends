@@ -32,8 +32,8 @@ this file.
 - RAM: every VM gets a fixed 16 GB, no ballooning (`--memballoon
   model=none`) — real memory, not overcommitted. See "Memory management"
   below for resizing.
-- CPU: fixed vCPUs, chosen at creation time (1, 4, or 8 — the host has 32
-  threads). Defaults to 8.
+- CPU: fixed vCPUs, chosen at creation time (1, 4, 8, 12 or 16 — the host
+  has 32 threads). Defaults to 8.
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
 - Use `--connect qemu:///system` for all virsh/virt-install commands.
@@ -167,7 +167,7 @@ FRIEND=joao             # login name
 FRIEND_KEY='ssh-ed25519 AAAA... friend'
 MEM=16384               # RAM, MiB
 DISK=256                # disk, GiB
-VCPUS=8                 # vCPUs (1, 4, or 8 in the TUI; any positive integer by hand)
+VCPUS=8                 # vCPUs (1/4/8/12/16 in the TUI; any positive integer by hand)
 
 cp noble-server-cloudimg-amd64.img ${NAME}.qcow2
 qemu-img resize ${NAME}.qcow2 ${DISK}G
@@ -277,10 +277,12 @@ soft ceiling.
 
 ## CPU management
 
-Every VM gets a fixed vCPU count chosen at creation time (1, 4, or 8 in the
-TUI; defaults to 8). There is no time cap within them — a VM can run all
-of its vCPUs at 100%; with 32 host threads that's acceptable even at 8.
-Changing the count later needs a shutdown:
+Every VM gets a fixed vCPU count chosen at creation time (1, 4, 8, 12 or 16
+in the TUI; defaults to 8). There is no time cap within them — a VM can run
+all of its vCPUs at 100%; with 32 host threads that's acceptable even at 16,
+though unlike RAM these are not reserved — vCPUs across VMs may total more
+than the host has, and they simply contend. Changing the count later needs a
+shutdown:
 
 ```bash
 virsh --connect qemu:///system shutdown ${NAME}    # wait for "shut off"
@@ -730,4 +732,11 @@ its files aside as a cold backup rather than leaving them startable.
   step aborts the rest) and end to end against libvirt by round-tripping
   `vm-workspace-demo-circle` 4 vCPU/24 GB -> 1/2 GB -> back, with the
   inactive XML diffing clean against a pre-change dump.
+- 2026-09-07: vCPU menu extended with 12 and 16 (was 1/4/8) in both the
+  create and edit forms; still defaults to 8. 16 verified against libvirt
+  on this host by round-tripping `vm-workspace-demo-circle` 4 -> 16 -> 4
+  (host has 32 threads, `virsh maxvcpus kvm` reports 255, so the menu is
+  nowhere near a limit). Note the asymmetry with RAM now worth remembering:
+  RAM is genuinely reserved and must not be oversubscribed, but vCPUs are
+  not — VMs may total more than 32 and simply contend for host threads.
 

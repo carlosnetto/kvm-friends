@@ -30,7 +30,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Sel
 MEM_OPTIONS = [("512 MB", 512), ("1 GB", 1024), ("2 GB", 2048), ("4 GB", 4096),
                ("8 GB", 8192), ("16 GB", 16384), ("24 GB", 24576), ("32 GB", 32768)]
 DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
-VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8)]
+VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8), ("12", 12), ("16", 16)]
 
 VIRSH = ["virsh", "--connect", "qemu:///system"]
 HERE = os.path.dirname(os.path.realpath(__file__))
