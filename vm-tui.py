@@ -6,8 +6,8 @@
 """vm-tui.py — interactive console for the friend VMs.
 
 Lists every VM with its state, IP, CPUs, RAM and disk usage, starts and stops
-them, and resizes a shut-off VM's CPU and RAM — so you never have to remember
-a virsh incantation.
+them, resizes a shut-off VM's CPU and RAM, and moves a VM to another host —
+so you never have to remember a virsh incantation.
 
     ./vm-tui.py
 
@@ -18,6 +18,7 @@ Python. Keys are shown in the footer.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Callable
 
@@ -31,6 +32,12 @@ MEM_OPTIONS = [("512 MB", 512), ("1 GB", 1024), ("2 GB", 2048), ("4 GB", 4096),
                ("8 GB", 8192), ("16 GB", 16384), ("24 GB", 24576), ("32 GB", 32768)]
 DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
 VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8), ("12", 12), ("16", 16)]
+RETIRE_OPTIONS = [("leave this VM defined here (safer)", False),
+                  ("undefine it here — keeps the disk as a backup", True)]
+
+# user@host:/absolute/path — the path is required so we never guess where the
+# destination repo lives.
+DEST_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:/.+$")
 
 VIRSH = ["virsh", "--connect", "qemu:///system"]
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -252,6 +259,59 @@ class EditVM(ModalScreen[dict | None]):
         self.dismiss({"name": self.vm_name, "mem": mem, "vcpus": vcpus})
 
 
+class MoveVM(ModalScreen[dict | None]):
+    """Collects a destination for move-vm.sh: another host's kvm-friends dir.
+
+    The VM keeps its name, UUID and MAC on the far side (move-vm.sh redefines
+    the dumped XML rather than rebuilding the domain), so Terraform and
+    anything else keyed on those still matches after the move."""
+
+    CSS = """
+    MoveVM { align: center middle; }
+    #box {
+        padding: 1 2; width: 78; height: auto; border: thick $accent;
+        background: $surface;
+    }
+    #box > Label { margin-top: 1; }
+    #warn { color: $warning; }
+    #buttons { margin-top: 1; height: 3; align: right middle; }
+    """
+
+    def __init__(self, name: str, state: str, disk: str) -> None:
+        super().__init__()
+        self.vm_name = name
+        self.vm_state = state
+        self.disk = disk
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Label(f"[b]Move {self.vm_name} to another host[/]")
+            yield Label("Destination kvm-friends folder (user@host:/absolute/path)")
+            yield Input(placeholder="cnetto@reliablesite:/home/cnetto/kvm-friends",
+                        id="dest")
+            yield Label("Afterwards, on this host")
+            yield Select(RETIRE_OPTIONS, value=False, id="retire", allow_blank=False)
+            if self.vm_state == "running":
+                yield Label(f"{self.vm_name} is running — it will be shut down "
+                            "cleanly first.", id="warn")
+            yield Label(f"About {self.disk} to copy. Nothing is deleted here.")
+            with Horizontal(id="buttons"):
+                yield Button("Move", variant="success", id="move")
+                yield Button("Cancel", variant="primary", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "move":
+            self.dismiss(None)
+            return
+        dest = self.query_one("#dest", Input).value.strip()
+        if not DEST_RE.match(dest):
+            self.app.notify("destination must be user@host:/absolute/path",
+                             severity="error", timeout=8)
+            return
+        self.dismiss({"name": self.vm_name, "dest": dest,
+                      "retire": self.query_one("#retire", Select).value})
+
+
 class ConfirmDestroy(ModalScreen[bool]):
     """Irreversible: deletes the domain, disk, seed and console password."""
 
@@ -305,6 +365,7 @@ class VMApp(App):
         ("c", "console", "Console"),
         ("n", "create_vm", "New"),
         ("e", "edit_vm", "Edit"),
+        ("m", "move_vm", "Move"),
         ("d", "destroy_vm", "Destroy"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
@@ -505,6 +566,53 @@ class VMApp(App):
             self.notify,
             f"{name}: now {vcpus} vCPU, {mem_label(mem)} — applies on next start",
             severity="information", timeout=8)
+        self.refresh_vms()
+
+    def action_move_vm(self) -> None:
+        vm = self.selected
+        if not vm:
+            return
+
+        def done(result: dict | None) -> None:
+            if result:
+                self.run_move(**result)
+
+        self.push_screen(
+            MoveVM(vm["name"], vm["state"], human(vm["disk"])), done)
+
+    @work(thread=True, group="move")
+    def run_move(self, name: str, dest: str, retire: bool) -> None:
+        script = os.path.join(HERE, "move-vm.sh")
+        args = [script, name, dest, "--yes"] + (["--retire-source"] if retire else [])
+        self.call_from_thread(
+            self.notify, f"Moving {name} to {dest} — shutdown, copy and "
+            "define. This can take a long while for a big disk.", timeout=10)
+        try:
+            proc = subprocess.Popen(args, cwd=HERE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+        except FileNotFoundError:
+            self.call_from_thread(self.notify, "move-vm.sh not found",
+                                   severity="error", timeout=10)
+            return
+        tail: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            tail.append(line)
+            if line.startswith("==>"):
+                self.call_from_thread(self.notify, line[4:], timeout=8)
+        proc.wait()
+        if proc.returncode == 0:
+            self.call_from_thread(
+                self.notify,
+                f"{name} moved to {dest.split(':')[0]}. It is shut off there — "
+                "start it from the TUI on that host." +
+                ("" if retire else f"  Still defined HERE too: never run both."),
+                severity="information", timeout=20)
+        else:
+            self.call_from_thread(
+                self.notify, f"move failed for {name}:\n" + "\n".join(tail[-6:]),
+                severity="error", timeout=25)
         self.refresh_vms()
 
     def action_destroy_vm(self) -> None:

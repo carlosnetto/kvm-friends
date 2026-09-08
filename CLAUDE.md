@@ -338,8 +338,9 @@ non-pty SSH command. Only the "up" step is manual:
 
 `./vm-tui.py` is the interactive front end — a list of every VM with
 single-key start (`s`), graceful shutdown (`h`), force off (`f`, confirmed),
-serial console (`c`) and resize (`e`, shut-off VMs only — see "Editing a
-VM's CPU and RAM" above). It is a Textual app run through uv: the PEP 723
+serial console (`c`), resize (`e`, shut-off VMs only — see "Editing a VM's
+CPU and RAM" above) and move to another host (`m`, see "Moving a VM to
+another host" below). It is a Textual app run through uv: the PEP 723
 metadata block at the top of the script declares `requires-python` and
 `textual`, and `uv run` builds a cached environment on first use, so there
 is nothing to pip-install. A new host needs `uv` and Python 3.13
@@ -404,6 +405,23 @@ the original. AppArmor needs no manual step: `virt-aa-helper` regenerates
 `/etc/apparmor.d/libvirt/libvirt-<uuid>.files` from the XML on each start.
 
 ## Moving a VM to another host
+
+Automated: `./move-vm.sh <name> <user@host:/path/to/kvm-friends>`, or press
+`m` in `./vm-tui.py`. It runs everything in this section — pre-flight on the
+destination, clean shutdown, `tar`-over-ssh stream, sha256 verify, then
+redefine there with the disk paths rewritten. It **never deletes anything on
+this host**; `--retire-source` only undefines the source domain (the disk
+files stay as a cold backup). The manual steps below remain the reference.
+
+Two things it does automatically that are easy to get wrong by hand: it
+refuses to start unless the destination already has the `isolate-guest`
+nwfilter, the `default` network, the machine type and free space, and it
+verifies sha256 on both sides *before* defining the domain — a bad copy
+leaves nothing registered on the far side.
+
+The VM keeps its **name, UUID and MAC**, so anything keyed on those —
+Terraform state included — still matches after the move. The only thing
+the script changes in the XML is the two absolute disk paths.
 
 Different from moving the *folder*: here one VM leaves this host for a
 different machine, and everything inside it must survive — same
@@ -739,4 +757,29 @@ its files aside as a cold backup rather than leaving them startable.
   nowhere near a limit). Note the asymmetry with RAM now worth remembering:
   RAM is genuinely reserved and must not be oversubscribed, but vCPUs are
   not — VMs may total more than 32 and simply contend for host threads.
+- 2026-09-08: `move-vm.sh` + `m` in `vm-tui.py` automate the whole
+  "Moving a VM to another host" section: destination pre-flight, clean
+  shutdown, `tar`-over-ssh stream, sha256 verify on both sides, then
+  redefine on the destination with the disk paths rewritten. Design points
+  worth keeping: (a) **nothing is ever deleted on the source** —
+  `--retire-source` at most undefines the domain and leaves the disk as a
+  cold backup, because the real hazard here is running both copies, which
+  fight over one Tailscale node key and identical SSH host keys; (b) the
+  domain XML is redefined, not rebuilt, so name/UUID/MAC survive and
+  Terraform state keyed on them still matches — verified by diffing source
+  against destination XML, where the *only* difference is the two absolute
+  disk paths; (c) checksums are compared **before** `virsh define`, so a
+  corrupted transfer leaves nothing registered on the far side. Compression
+  is negotiated to the best codec both ends have (zstd > pigz > gzip,
+  `--no-compress` to skip): measured on these real disks, ratios ran 1.05x
+  on `vm-dtw-k3s`'s first 400 MB but 1.45x and 2.48x mid-file on `vm-anac`
+  and `vm-workspace-demo-circle`, and zstd's cost is negligible next to
+  gzip's (0.35s vs 5.8s per 400 MB), so it is close to free when it helps.
+  Verified in a sandbox — a throwaway copy of the repo with real qcow2
+  files, real tar/ssh-pipeline/sha256/compression, and stubbed `virsh`/`ssh`
+  — since all four VMs on this host were running and there was no second
+  host to move to: full clean move, all 10 pre-flight guards refusing
+  without defining anything remotely, deliberate mid-transfer corruption
+  caught, `--retire-source`, and `--no-compress`. **Not yet exercised
+  against a real second host**; the first real run is the proof.
 
