@@ -262,9 +262,11 @@ class EditVM(ModalScreen[dict | None]):
 class MoveVM(ModalScreen[dict | None]):
     """Collects a destination for move-vm.sh: another host's kvm-friends dir.
 
-    The VM keeps its name, UUID and MAC on the far side (move-vm.sh redefines
-    the dumped XML rather than rebuilding the domain), so Terraform and
-    anything else keyed on those still matches after the move."""
+    The VM keeps its Tailscale identity on the far side — the node key lives
+    in the guest filesystem, so it travels inside the qcow2 — and its name,
+    UUID and MAC, because move-vm.sh redefines the dumped XML rather than
+    rebuilding the domain. The corollary is that the two copies must never
+    both run: see the warning move-vm.sh prints when it finishes."""
 
     CSS = """
     MoveVM { align: center middle; }

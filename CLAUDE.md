@@ -419,9 +419,25 @@ nwfilter, the `default` network, the machine type and free space, and it
 verifies sha256 on both sides *before* defining the domain — a bad copy
 leaves nothing registered on the far side.
 
-The VM keeps its **name, UUID and MAC**, so anything keyed on those —
-Terraform state included — still matches after the move. The only thing
-the script changes in the XML is the two absolute disk paths.
+**The VM keeps its Tailscale identity**, so once booted on the far side it
+answers on the same 100.x address and the friend notices nothing but the
+downtime. That is preserved by the *disk copy*, not by the XML:
+`/var/lib/tailscale/tailscaled.state` (the node key) lives inside the guest
+filesystem, so it travels in the qcow2 — which is exactly why the script
+verifies sha256 on both sides before defining anything. Confirmed on
+`vm-dtw-k3s`: that file sits in `/var/lib/tailscale/` at 0600 root:root,
+alongside `profile-data/`.
+
+Separately, the XML is redefined rather than rebuilt, so **name, UUID and
+MAC** survive too — the MAC because cloud-init pinned it into the guest's
+netplan `match:` rule (a fresh one boots the VM with no network), the rest
+because anything keyed on them should still match. The only thing the
+script changes in the XML is the two absolute disk paths.
+
+The flip side of a portable identity is that it must not be duplicated: two
+copies of the same disk share one node key and would fight over it. That is
+why nothing is deleted here and the source is left defined but flagged —
+see `--retire-source`.
 
 Different from moving the *folder*: here one VM leaves this host for a
 different machine, and everything inside it must survive — same
@@ -765,10 +781,9 @@ its files aside as a cold backup rather than leaving them startable.
   `--retire-source` at most undefines the domain and leaves the disk as a
   cold backup, because the real hazard here is running both copies, which
   fight over one Tailscale node key and identical SSH host keys; (b) the
-  domain XML is redefined, not rebuilt, so name/UUID/MAC survive and
-  Terraform state keyed on them still matches — verified by diffing source
-  against destination XML, where the *only* difference is the two absolute
-  disk paths; (c) checksums are compared **before** `virsh define`, so a
+  domain XML is redefined, not rebuilt, so name/UUID/MAC survive — verified
+  by diffing source against destination XML, where the *only* difference is
+  the two absolute disk paths; (c) checksums are compared **before** `virsh define`, so a
   corrupted transfer leaves nothing registered on the far side. Compression
   is negotiated to the best codec both ends have (zstd > pigz > gzip,
   `--no-compress` to skip): measured on these real disks, ratios ran 1.05x
@@ -782,4 +797,23 @@ its files aside as a cold backup rather than leaving them startable.
   without defining anything remotely, deliberate mid-transfer corruption
   caught, `--retire-source`, and `--no-compress`. **Not yet exercised
   against a real second host**; the first real run is the proof.
-
+- 2026-09-09: correction to the entry above — the reason the move must
+  preserve identity is **Tailscale**, not Terraform (that was a slip in the
+  original write-up). The mechanism is different and worth being precise
+  about: Tailscale identity is preserved by the *disk copy*, since
+  `/var/lib/tailscale/tailscaled.state` lives in the guest filesystem and
+  travels inside the qcow2 — verified on the running `vm-dtw-k3s`, where
+  that file is 0600 root:root next to `profile-data/`, and the guest answers
+  on 100.66.218.42. This is not theory: the 2026-08-31 `vm-anac` move
+  (reliablesite -> msa1-01-ord) already proved it end to end — Tailscale
+  kept working on the new host with no modifications inside the guest, which
+  is the same guest image these scripts produce. That move copied the qcow2
+  plus the domain definition (UUID, MAC and all), which is what `move-vm.sh`
+  now does — plus the seed image, which the domain lists as a second disk
+  and will not start without, and the console password. Preserving
+  name/UUID/MAC via the XML is a *separate* guarantee from the Tailscale one
+  (the MAC matters because of the netplan `match:` rule). No code changed:
+  `move-vm.sh` already copies the disk byte-for-byte and sha256-verifies it
+  before defining, which is exactly what a portable Tailscale identity
+  needs. It also sharpens why the "never run both copies"
+  warning matters — two copies of one node key fight over that identity.
