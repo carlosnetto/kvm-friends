@@ -29,9 +29,14 @@ this file.
 - Disks are qcow2, thin-provisioned, 256 GB by default (`create-vm.sh`
   accepts a 6th argument to override, in GiB — the TUI offers 128/256/
   512/1024).
-- RAM: every VM gets a fixed 16 GB, no ballooning (`--memballoon
-  model=none`) — real memory, not overcommitted. See "Memory management"
-  below for resizing.
+- RAM: every VM gets a fixed 16 GB by default — the guest boots with all
+  of it and nothing ever takes it away. The virtio balloon is present but
+  **never inflated**; it is there only for free-page reporting, so an idle
+  guest hands genuinely-free pages back to the host on its own
+  (`--memballoon model=virtio,freePageReporting=on`). It is a per-domain
+  attribute, switchable on an existing VM while it is shut off — `e` in
+  `./vm-tui.py`. See "Memory management" below for resizing, overcommit and
+  host swap sizing.
 - CPU: fixed vCPUs, chosen at creation time (1, 4, 8, 12 or 16 — the host
   has 32 threads). Defaults to 8.
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
@@ -227,7 +232,7 @@ rm user-data meta-data
 virt-install --connect qemu:///system \
   --name ${NAME} \
   --memory ${MEM} \
-  --memballoon model=none \
+  --memballoon model=virtio,freePageReporting=on,stats.period=10 \
   --vcpus ${VCPUS} \
   --disk path=$PWD/${NAME}.qcow2,format=qcow2,bus=virtio \
   --disk path=$PWD/${NAME}-seed.img,format=raw,bus=virtio \
@@ -256,13 +261,51 @@ ssh ${FRIEND}@<ip> "ping -c1 -W2 ${GW}; ping -c1 -W2 192.168.122.1; curl -sI htt
 
 ## Memory management
 
-Every VM gets a fixed amount of real RAM at creation time (16 GB by
-default — `create-vm.sh` accepts a 5th argument to override, in MiB).
-There is no balloon (`--memballoon model=none`): the guest's memory is
-reserved on the host for the VM's whole lifetime, not overcommitted or
-grown on demand.
+Every VM gets a fixed amount of RAM at creation time (16 GB by default —
+`create-vm.sh` accepts a 5th argument to override, in MiB). `virt-install`
+is given `--memory` only, so `<memory>` and `<currentMemory>` come out
+equal and **the balloon starts empty**: the guest boots seeing all of its
+RAM, and no host action ever reduces it.
 
-Changing it later needs a shutdown, same pattern as vCPUs:
+The balloon device is still attached
+(`--memballoon model=virtio,freePageReporting=on,stats.period=10`) for one
+reason: **free page reporting**. The guest's page allocator reports runs of
+pages sitting on its own free list, and the host `madvise`-frees them. It
+is automatic, guest-driven, and one-way — the host never asks the guest for
+anything, so there is no way for it to squeeze a running VM.
+
+What it does and does not buy you:
+
+- It **does** return memory a guest has allocated and freed, without the
+  host having to page it out to swap. Most useful right after boot and
+  after a big job exits.
+- It does **not** return page cache. Cached pages are not free from the
+  guest's point of view, and a Linux guest fills everything it is not using
+  with cache — so a VM that has been up for days reports little back, and
+  its QEMU RSS stays near its full size. Reporting reduces overcommit
+  pressure; it does not remove the need for host swap.
+- There is no "idle VM releases its RAM" behaviour beyond the above.
+
+**Never inflate the balloon.** Do not run `setmem` below `<memory>` on a
+running domain, and never boot with `<currentMemory>` lower than
+`<memory>`. Either one hands the guest less RAM than it thinks it has;
+the guest then hits its own OOM killer while the host looks fine. That —
+not the balloon device itself — is what made the 2026-07-10 "boot at 4 GB,
+ceiling 16 GB" policy unstable, and it is why that policy was dropped
+entirely on 2026-08-03 before being reintroduced in this safe one-way form.
+(If anyone ever does deliberately drive `setmem`, add `autodeflate='on'` as
+an emergency valve first. The policy here is simply not to.)
+
+Watch what is actually being returned — `stats.period='10'` makes the guest
+publish memory stats every 10 s:
+
+```bash
+virsh --connect qemu:///system dommemstat ${NAME}
+# actual = what the host has given the guest; unused/available = what the
+# guest reports free; rss = what QEMU actually holds on the host.
+```
+
+Changing the size later needs a shutdown, same pattern as vCPUs:
 
 ```bash
 virsh --connect qemu:///system shutdown ${NAME}    # wait for "shut off"
@@ -271,9 +314,121 @@ virsh --connect qemu:///system setmem ${NAME} 24G --config
 virsh --connect qemu:///system start ${NAME}
 ```
 
-Don't promise the sum of every VM's memory: only size a VM up while the
-host has real free RAM (`free -h`) — this is genuinely reserved, not a
-soft ceiling.
+Both calls, always, and in that order when growing: `setmaxmem` alone
+leaves `<currentMemory>` behind and boots the VM with an inflated balloon —
+exactly the failure above.
+
+### Adding reporting to a VM created before 2026-09-11
+
+VMs made by the older recipe carry `<memballoon model='none'/>` and will
+never report anything back. The device cannot be added to a running domain
+here, so this needs a shutdown — but it is a pure XML edit, no reinstall
+and nothing inside the guest to change (Ubuntu 24.04's kernel has both
+`virtio_balloon` and free page reporting, which needs 5.7+).
+
+Easiest route: shut the VM down (`h` in `./vm-tui.py`), press `e`, and set
+**Free-page reporting** to on. The BALLOON column shows each VM's current
+mode (`report` / `off`), read from the *inactive* XML — i.e. what the next
+boot will use. By hand:
+
+```bash
+virsh --connect qemu:///system shutdown ${NAME}    # wait for "shut off"
+virsh --connect qemu:///system edit ${NAME}
+#   replace:  <memballoon model='none'/>
+#   with:     <memballoon model='virtio' freePageReporting='on'>
+#               <stats period='10'/>
+#             </memballoon>
+virsh --connect qemu:///system start ${NAME}
+virsh --connect qemu:///system dommemstat ${NAME}  # 'unused' now appears
+```
+
+Check `<currentMemory>` equals `<memory>` while you are in there. If an
+older VM has them different, fix it in the same edit — that VM has been
+running with an inflated balloon.
+
+### Overcommitting the host, and sizing swap for it
+
+Guest RAM is ordinary **anonymous** memory on the host, and QEMU's RSS only
+ever grows toward the configured size as the guest touches pages. So the
+honest planning number is the **sum of every VM's configured RAM**, not
+what `free -h` shows today.
+
+If that sum exceeds host RAM, the difference has to live in swap, and the
+host must be set up for it:
+
+- **Swap must cover the gap.** Roughly:
+  `swap >= (sum of configured VM RAM) - (host RAM minus a few GB for the
+  host itself)`. Undershoot and the OOM killer eventually picks a
+  `qemu-system-x86` — which is a VM dying hard, not a slowdown. On a fast
+  NVMe a swapfile is cheap: `swapoff /swapfile && fallocate -l <N>G
+  /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`
+  (the `/etc/fstab` entry names the file, so it needs no edit).
+- **Leave `vm.swappiness` at the default 60 — do not lower it.** The usual
+  workstation advice (10) is exactly backwards on a VM host: guest RAM *is*
+  the anonymous memory that low swappiness protects, so 10 tells the kernel
+  to keep idle guest pages resident and throw away page cache instead. 60,
+  or higher, is what lets a cold VM drift out to disk.
+- **Waking a swapped-out VM is slow** even on NVMe: the guest faults its
+  working set back in page by page. Expect a sluggish minute or two, not an
+  instant resume. If two VMs genuinely alternate rather than run together,
+  shutting the idle one down (`h` in `vm-tui.py`) is faster and free.
+- **KSM helps a little.** Guests built from the same base image share
+  identical pages; check with
+  `grep . /sys/kernel/mm/ksm/pages_sharing /sys/kernel/mm/ksm/run`. Expect
+  hundreds of MB, not GB — it is a bonus, not a plan.
+
+### Guests running k3s with Java workloads
+
+The 32 GB k3s VMs are the hard case for everything above, and the reason is
+worth stating plainly: **free page reporting can only hand back pages that
+are on the guest kernel's free list.** For a JVM the chain is GC frees
+objects -> the JVM uncommits heap to the guest kernel -> the pages land on
+the free list -> reporting gives them to the host. Step two does not happen
+by default, and an unattended node breaks it in the worst way: **an idle
+JVM never GCs at all** (no allocation, no trigger), so 30-60 pods sit on
+fully-committed heaps indefinitely. Left alone, such a VM reports almost
+nothing back no matter how idle it looks.
+
+Three guest-side levers, in order of how much they return:
+
+- **Swap inside the guest.** The guest kernel knows which JVM pages are
+  cold in a way the host can only approximate, and once it pages them out
+  they become free in the guest — so reporting then returns that RAM to the
+  host *for real*, instead of the host merely holding them in its own swap.
+  kubelet refuses to start with swap enabled unless told otherwise:
+  `k3s server --kubelet-arg=fail-swap-on=false` (same flag for `agent`).
+  Note this check only sees **guest** swap — host swap is invisible to the
+  guest and never trips it.
+- **A GC that uncommits.** ZGC (`-XX:+UseZGC`, uncommits after
+  `-XX:ZUncommitDelay`, 300 s by default) and Shenandoah (uncommit on by
+  default) return heap when idle. G1 — the default — only uncommits at a
+  full GC unless `-XX:G1PeriodicGCInterval=300000` is set, which exists
+  precisely for idle containers. This flag is what turns the balloon from
+  "returns nothing" into "returns most of the heap five minutes after the
+  user walks away".
+- **Real memory limits on the pods.** This one bites before the host is
+  even involved: a JVM with no container limit sees the whole 32 GB node
+  and defaults its max heap to 25% of it — 8 GB each. Thirty of those is a
+  guest-side OOM with the host still showing free RAM. Set container limits
+  and `-XX:MaxRAMPercentage` so the JVMs size themselves to the limit.
+
+On a host with such guests, push `vm.swappiness` to 80-100 rather than
+leaving it at 60 (see the overcommit section above) — a VM abandoned for
+days is exactly what should drift out to the NVMe.
+
+**Do not plan on KSM here.** Java is close to its worst case: KSM merges by
+page *content*, and a mutating heap under a compacting GC either never
+holds two pages identical long enough to merge or COW-breaks the merge
+immediately. Measured on this host with one 32 GB Java guest running,
+~116 MB was actually shared against ~9.7 GB classed `pages_volatile`
+(changing too fast to try) for 49 s of ksmd CPU:
+
+```bash
+grep . /sys/kernel/mm/ksm/pages_sharing /sys/kernel/mm/ksm/pages_volatile
+```
+
+It costs little and needs no setup, so there is no reason to turn it off —
+just do not count its savings toward a memory budget.
 
 ## CPU management
 
@@ -291,18 +446,29 @@ virsh --connect qemu:///system setvcpus ${NAME} 16 --config
 virsh --connect qemu:///system start ${NAME}
 ```
 
-## Editing a VM's CPU and RAM
+## Editing a VM's CPU, RAM and balloon
 
-`./vm-tui.py` does both in one place: select a VM and press `e`. The form
-prefills with the VM's current values and writes them with the same
-`--config` virsh calls documented in the two sections above; disk is shown
-but not editable (growing it needs `qemu-img resize` plus a partition/fs
-grow inside the guest, which is not a one-keystroke operation).
+`./vm-tui.py` does all three in one place: select a VM and press `e`. The
+form prefills with the VM's current values and writes CPU and RAM with the
+same `--config` virsh calls documented in the two sections above; disk is
+shown but not editable (growing it needs `qemu-img resize` plus a
+partition/fs grow inside the guest, which is not a one-keystroke
+operation).
+
+The balloon is the odd one out, because there is no virsh verb for it: the
+TUI dumps the inactive XML, replaces the whole `<memballoon>` element and
+redefines the domain. Replacing rather than patching is deliberate —
+switching the model invalidates the device's PCI `<address>`, and dropping
+it lets libvirt assign a fresh one at define time. It runs **after** the
+`setmem`/`setvcpus` steps for the same reason the pairs are ordered: those
+calls rewrite the stored XML, so a dump taken before them would define a
+stale copy and silently undo the resize.
 
 **The VM must be `shut off`** — `e` refuses otherwise. This is not
-squeamishness: there is no balloon and no CPU hotplug here, so a `--config`
-edit on a running domain applies only at the next boot and the table would
-report a size the guest isn't running on. Shut down with `h` first; the
+squeamishness: the balloon is never inflated and there is no CPU hotplug
+here, so a `--config` edit on a running domain applies only at the next
+boot and the table would report a size the guest isn't running on. The
+balloon device itself cannot be swapped on a live domain at all. Shut down with `h` first; the
 change takes effect on the next `s`.
 
 Order matters within each pair, and the TUI picks it based on the
@@ -817,3 +983,67 @@ its files aside as a cold backup rather than leaving them startable.
   before defining, which is exactly what a portable Tailscale identity
   needs. It also sharpens why the "never run both copies"
   warning matters — two copies of one node key fight over that identity.
+- 2026-09-11: memory policy changed again, and this time the balloon is
+  back — but only in the direction that cannot hurt. `create-vm.sh` now
+  passes `--memballoon model=virtio,freePageReporting=on,stats.period=10`
+  instead of `model=none`, while still passing `--memory` alone so
+  `<memory>` and `<currentMemory>` come out equal and the balloon starts
+  **empty** (verified with `virt-install --print-xml`, which also confirmed
+  libvirt 10.0.0 accepts both attributes — they are in
+  `domaincommon.rng`). The guest therefore always sees all of its RAM and
+  nothing can take any away; the device exists solely so the guest's
+  allocator can hand back pages on its own free list. Prompted by a real
+  need on `msa1-01-vcp`: 60 GB of host RAM, `vm-monise` (8 GB) and
+  `vm-monise-dtw` (32 GB, already 19 GB resident) running, and two more
+  32 GB VMs to create — 104 GB configured against 60 GB of RAM. The
+  important correction recorded while working this out: the 2026-07-10
+  instability was **not** the balloon device misbehaving. That policy
+  booted guests at 4 GB `<currentMemory>` under a 16 GB `<memory>`, i.e.
+  with the balloon inflated by 12 GB, and nothing ever ran `setmem` to
+  give it back — so guests hit their own OOM killer inside an artificially
+  small box, with `autodeflate` firing as an emergency valve. Inflation was
+  the bug; reporting is safe and one-way. Also corrected, after nearly
+  getting it backwards on this host: **do not lower `vm.swappiness` on a VM
+  host.** Guest RAM is host anonymous memory, which is exactly what low
+  swappiness protects, so the usual workstation value of 10 tells the
+  kernel to keep idle guest pages resident and evict page cache instead —
+  the opposite of what an over-subscribed host wants. Left at the default
+  60. Host swap on this box grown 512 MB -> 32 GB -> 64 GB on the NVMe to
+  cover the gap, since undershooting swap means the OOM killer eventually
+  takes a whole `qemu-system-x86` process rather than merely slowing
+  things down. KSM was already on here and is worth roughly 116 MB across
+  two guests — a bonus, not a plan. Documented but **not applied to the
+  two existing VMs**: that needs a shutdown plus the XML edit now written
+  up under "Adding reporting to a VM created before 2026-09-11".
+  Sharpened once the workload was known — the two new VMs will run k3s with
+  30-60 Java pods and sit unattended for days at a time, which is the case
+  free page reporting handles *worst*: an idle JVM never GCs, so its heap is
+  never uncommitted to the guest kernel and there is nothing on the free
+  list to report. The balloon's real value there is as the **return path**
+  for guest-side reclaim, not as a mechanism of its own, so "Guests running
+  k3s with Java workloads" was added with the three levers that actually
+  free memory (guest swap + `--kubelet-arg=fail-swap-on=false`, an
+  uncommitting GC or `-XX:G1PeriodicGCInterval`, and pod memory limits with
+  `-XX:MaxRAMPercentage`). Host swap stays the primary mechanism for this
+  workload, since it needs no cooperation from Java or k3s at all. KSM ruled
+  out on measurement rather than theory (~116 MB shared vs ~9.7 GB volatile
+  with one Java guest up); Carlos's instinct was right, though the mechanism
+  is content mutation under a compacting GC, not JIT address translation.
+  Decision taken: host swap only (option 1), no JVM flags, no guest swap, and
+  overbooking kept modest.
+- 2026-09-11: free-page reporting made a per-VM switch. `<memballoon>` is a
+  per-domain attribute, so `vm-tui.py`'s `e` form gained a **Free-page
+  reporting** select alongside vCPUs and RAM, and the table gained a BALLOON
+  column (`report` / `off`) read from the *inactive* XML — what the next boot
+  will use. Same `shut off` gating as the rest of the form: the device cannot
+  be swapped on a live domain. There is no virsh verb for this, so the TUI
+  dumps the inactive XML, replaces the whole `<memballoon>` element and
+  redefines; replacing rather than patching is what drops the now-invalid PCI
+  `<address>` so libvirt assigns a fresh one. It runs *after* the
+  `setmem`/`setvcpus` steps, since those rewrite the stored XML and a dump
+  taken earlier would define a stale copy and undo the resize. Verified
+  headlessly with `App.run_test()` and a stubbed `virsh` (24 checks: parsing
+  all four `<memballoon>` shapes, both rewrite directions, disk/MAC/filterref/
+  memory preserved across the redefine, step ordering in three scenarios, and
+  the modal's prefill plus no-op path), then read-only against libvirt — both
+  live VMs correctly report `off`.

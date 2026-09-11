@@ -5,9 +5,10 @@
 # ///
 """vm-tui.py — interactive console for the friend VMs.
 
-Lists every VM with its state, IP, CPUs, RAM and disk usage, starts and stops
-them, resizes a shut-off VM's CPU and RAM, and moves a VM to another host —
-so you never have to remember a virsh incantation.
+Lists every VM with its state, IP, CPUs, RAM, disk usage and balloon mode,
+starts and stops them, resizes a shut-off VM's CPU and RAM and switches its
+free-page reporting on or off, and moves a VM to another host — so you never
+have to remember a virsh incantation.
 
     ./vm-tui.py
 
@@ -20,6 +21,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
 from textual import work
@@ -34,6 +37,11 @@ DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024
 VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8), ("12", 12), ("16", 16)]
 RETIRE_OPTIONS = [("leave this VM defined here (safer)", False),
                   ("undefine it here — keeps the disk as a backup", True)]
+# The balloon is never inflated either way — "on" only lets the guest hand
+# back pages already on its own free list. See "Memory management" in
+# CLAUDE.md for why the off position exists at all.
+BALLOON_OPTIONS = [("on — guest returns free pages to the host", True),
+                   ("off — plain fixed RAM, nothing returned", False)]
 
 # user@host:/absolute/path — the path is required so we never guess where the
 # destination repo lives.
@@ -43,7 +51,7 @@ VIRSH = ["virsh", "--connect", "qemu:///system"]
 HERE = os.path.dirname(os.path.realpath(__file__))
 REFRESH_SECONDS = 5.0
 
-COLUMNS = ("NAME", "STATE", "IP", "VCPU", "RAM cur/max", "DISK")
+COLUMNS = ("NAME", "STATE", "IP", "VCPU", "RAM cur/max", "DISK", "BALLOON")
 
 
 def virsh(*args: str, timeout: int = 60) -> tuple[bool, str]:
@@ -84,6 +92,59 @@ def options_with(options: list[tuple[str, int]], value: int,
     return sorted(options + [(label(value), value)], key=lambda o: o[1])
 
 
+def balloon_on(name: str) -> bool | None:
+    """Is this domain's balloon reporting free pages back to the host?
+
+    Read from the INACTIVE XML deliberately: that is what the next boot will
+    use, and it is the only thing this TUI can change — the device cannot be
+    swapped on a running domain."""
+    ok, xml = virsh("dumpxml", "--inactive", name)
+    if not ok:
+        return None
+    try:
+        dev = ET.fromstring(xml).find("./devices/memballoon")
+    except ET.ParseError:
+        return None
+    if dev is None:
+        return False
+    return dev.get("model") != "none" and dev.get("freePageReporting") == "on"
+
+
+def set_balloon(name: str, on: bool) -> tuple[bool, str]:
+    """Rewrite the domain's <memballoon> and redefine it.
+
+    The whole element is replaced rather than patched: switching model drops
+    the old PCI <address> with it, and libvirt assigns a fresh one at define
+    time. Safe only while the domain is off, which the caller enforces."""
+    ok, xml = virsh("dumpxml", "--inactive", name)
+    if not ok:
+        return False, xml
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError as exc:
+        return False, f"could not parse {name}'s XML: {exc}"
+    devices = root.find("./devices")
+    if devices is None:
+        return False, f"{name}: no <devices> element in the domain XML"
+    for old_dev in devices.findall("memballoon"):
+        devices.remove(old_dev)
+    dev = ET.SubElement(devices, "memballoon")
+    if on:
+        dev.set("model", "virtio")
+        dev.set("freePageReporting", "on")
+        ET.SubElement(dev, "stats").set("period", "10")
+    else:
+        dev.set("model", "none")
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", prefix=f"{name}-",
+                                     delete=False) as fh:
+        fh.write(ET.tostring(root, encoding="unicode"))
+        path = fh.name
+    try:
+        return virsh("define", path)
+    finally:
+        os.unlink(path)
+
+
 def disk_usage(name: str) -> int | None:
     """Actual thin-provisioned size on disk, not the 256 G virtual size."""
     try:
@@ -101,7 +162,8 @@ def fetch_vms() -> tuple[list[dict] | None, str | None]:
         if not name:
             continue
         vm = {"name": name, "state": "?", "ip": "-", "vcpu": "-",
-              "cur": None, "max": None, "disk": disk_usage(name)}
+              "cur": None, "max": None, "disk": disk_usage(name),
+              "balloon": balloon_on(name)}
         ok, info = virsh("dominfo", name)
         if ok:
             for line in info.splitlines():
@@ -181,7 +243,7 @@ class CreateVM(ModalScreen[dict | None]):
             yield Input(placeholder="ssh-ed25519 AAAA... friend", id="key")
             yield Label("Tailscale pre-auth key (optional — leave blank to skip)")
             yield Input(placeholder="tskey-...", id="tskey")
-            yield Label("RAM (fixed, no ballooning)")
+            yield Label("RAM (fixed, balloon never inflated)")
             yield Select(MEM_OPTIONS, value=16384, id="mem", allow_blank=False)
             yield Label("vCPUs (fixed)")
             yield Select(VCPU_OPTIONS, value=8, id="vcpus", allow_blank=False)
@@ -211,9 +273,9 @@ class CreateVM(ModalScreen[dict | None]):
 
 
 class EditVM(ModalScreen[dict | None]):
-    """Resize a shut-off VM's CPU and RAM. Disk is deliberately not editable:
-    growing it needs qemu-img plus a resize inside the guest, which is not a
-    one-keystroke operation."""
+    """Resize a shut-off VM's CPU and RAM and switch free-page reporting on or
+    off. Disk is deliberately not editable: growing it needs qemu-img plus a
+    resize inside the guest, which is not a one-keystroke operation."""
 
     CSS = """
     EditVM { align: center middle; }
@@ -225,22 +287,27 @@ class EditVM(ModalScreen[dict | None]):
     #buttons { margin-top: 1; height: 3; align: right middle; }
     """
 
-    def __init__(self, name: str, vcpus: int, mem_mib: int, disk: str) -> None:
+    def __init__(self, name: str, vcpus: int, mem_mib: int, disk: str,
+                 balloon: bool) -> None:
         super().__init__()
         self.vm_name = name
         self.vcpus = vcpus
         self.mem_mib = mem_mib
         self.disk = disk
+        self.balloon = balloon
 
     def compose(self) -> ComposeResult:
         with Vertical(id="box"):
             yield Label(f"[b]Edit {self.vm_name}[/]  (currently shut off)")
-            yield Label("RAM (fixed, no ballooning)")
+            yield Label("RAM (fixed, balloon never inflated)")
             yield Select(options_with(MEM_OPTIONS, self.mem_mib, mem_label),
                          value=self.mem_mib, id="mem", allow_blank=False)
             yield Label("vCPUs (fixed)")
             yield Select(options_with(VCPU_OPTIONS, self.vcpus, str),
                          value=self.vcpus, id="vcpus", allow_blank=False)
+            yield Label("Free-page reporting (balloon)")
+            yield Select(BALLOON_OPTIONS, value=self.balloon, id="balloon",
+                         allow_blank=False)
             yield Label(f"Disk: {self.disk} used — not editable here")
             with Horizontal(id="buttons"):
                 yield Button("Apply", variant="success", id="apply")
@@ -252,11 +319,14 @@ class EditVM(ModalScreen[dict | None]):
             return
         mem = self.query_one("#mem", Select).value
         vcpus = self.query_one("#vcpus", Select).value
-        if mem == self.mem_mib and vcpus == self.vcpus:
+        balloon = self.query_one("#balloon", Select).value
+        if (mem == self.mem_mib and vcpus == self.vcpus
+                and balloon == self.balloon):
             self.app.notify("nothing changed")
             self.dismiss(None)
             return
-        self.dismiss({"name": self.vm_name, "mem": mem, "vcpus": vcpus})
+        self.dismiss({"name": self.vm_name, "mem": mem, "vcpus": vcpus,
+                      "balloon": balloon})
 
 
 class MoveVM(ModalScreen[dict | None]):
@@ -408,8 +478,9 @@ class VMApp(App):
             if vm["cur"] is not None and vm["max"] is not None:
                 ram = f"{human(vm['cur'])}/{human(vm['max'])}"
             colour = {"running": "green", "paused": "yellow"}.get(vm["state"], "yellow")
+            balloon = {True: "report", False: "off", None: "-"}[vm["balloon"]]
             table.add_row(vm["name"], f"[{colour}]{vm['state']}[/]", vm["ip"],
-                          vm["vcpu"], ram, human(vm["disk"]))
+                          vm["vcpu"], ram, human(vm["disk"]), balloon)
         if vms:
             table.move_cursor(row=min(keep, len(vms) - 1))
 
@@ -516,7 +587,8 @@ class VMApp(App):
         vm = self.selected
         if not vm:
             return
-        # CPU and RAM are fixed at boot here — no hotplug, no balloon — so
+        # CPU and RAM are fixed at boot here — no hotplug, and the balloon is
+        # never inflated (free-page reporting only) — so
         # these are --config edits that only land on the next start. Requiring
         # the domain to be off is what keeps the table honest about that.
         if vm["state"] != "shut off":
@@ -529,21 +601,24 @@ class VMApp(App):
         except (TypeError, ValueError):
             cur_vcpus = None
         cur_mem = vm["max"] // (1024 * 1024) if vm["max"] else None
-        if cur_vcpus is None or cur_mem is None:
-            self.notify(f"can't read {vm['name']}'s current CPU/RAM",
+        cur_balloon = vm["balloon"]
+        if cur_vcpus is None or cur_mem is None or cur_balloon is None:
+            self.notify(f"can't read {vm['name']}'s current CPU/RAM/balloon",
                         severity="error", timeout=8)
             return
 
         def done(result: dict | None) -> None:
             if result:
-                self.run_edit(cur_vcpus=cur_vcpus, cur_mem=cur_mem, **result)
+                self.run_edit(cur_vcpus=cur_vcpus, cur_mem=cur_mem,
+                              cur_balloon=cur_balloon, **result)
 
         self.push_screen(
-            EditVM(vm["name"], cur_vcpus, cur_mem, human(vm["disk"])), done)
+            EditVM(vm["name"], cur_vcpus, cur_mem, human(vm["disk"]),
+                   cur_balloon), done)
 
     @work(thread=True, group="action")
-    def run_edit(self, name: str, vcpus: int, mem: int,
-                 cur_vcpus: int, cur_mem: int) -> None:
+    def run_edit(self, name: str, vcpus: int, mem: int, balloon: bool,
+                 cur_vcpus: int, cur_mem: int, cur_balloon: bool) -> None:
         # Each pair is (ceiling, value) and the ceiling bounds the value, so
         # raise the ceiling before the value and lower the value before the
         # ceiling — the other order asks libvirt for a state it rejects.
@@ -564,9 +639,22 @@ class VMApp(App):
                     severity="error", timeout=15)
                 self.refresh_vms()
                 return
+        # Balloon last: the setmem/setvcpus steps above rewrite the stored XML,
+        # so set_balloon has to dump it *after* them or it would define a copy
+        # taken before the resize and silently undo it.
+        if balloon != cur_balloon:
+            ok, out = set_balloon(name, balloon)
+            if not ok:
+                self.call_from_thread(
+                    self.notify, f"balloon change failed:\n{out}",
+                    severity="error", timeout=15)
+                self.refresh_vms()
+                return
+        report = "reporting on" if balloon else "reporting off"
         self.call_from_thread(
             self.notify,
-            f"{name}: now {vcpus} vCPU, {mem_label(mem)} — applies on next start",
+            f"{name}: now {vcpus} vCPU, {mem_label(mem)}, {report}"
+            " — applies on next start",
             severity="information", timeout=8)
         self.refresh_vms()
 

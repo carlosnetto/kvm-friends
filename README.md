@@ -58,7 +58,7 @@ Local only (gitignored):
 | File | Purpose |
 |---|---|
 | `noble-server-cloudimg-amd64.img` | Base image: Ubuntu Server 24.04 LTS cloud image (downloaded at bootstrap, checksum-verified). **Never boot or modify this file** — always copy it. |
-| `<vm-name>.qcow2` | A VM's disk (256 GB virtual by default, thin-provisioned — grows with use). VMs get fixed RAM (no ballooning — real memory, 16 GB by default) and fixed vCPUs (1, 4, 8, 12 or 16, 8 by default), both chosen at creation time. |
+| `<vm-name>.qcow2` | A VM's disk (256 GB virtual by default, thin-provisioned — grows with use). VMs get fixed RAM (16 GB by default) and fixed vCPUs (1, 4, 8, 12 or 16, 8 by default), both chosen at creation time. The guest always sees all of its RAM — the virtio balloon is never inflated, and is present only so an idle guest can hand genuinely-free pages back to the host. |
 | `<vm-name>-seed.img` | The VM's cloud-init seed (user, SSH keys, hostname, console password). Only used on first boot. |
 | `<vm-name>-console-password.txt` | Password for local serial-console login (not usable over SSH). |
 

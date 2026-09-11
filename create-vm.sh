@@ -9,9 +9,10 @@
 # path)" in CLAUDE.md), since `tailscale up` needs an interactive login URL
 # that isn't reliable to scrape from a backgrounded, non-pty SSH command.
 # Pass '' to skip it explicitly (e.g. when scripting). The 5th (RAM, in
-# MiB) defaults to 16384 — fixed for the VM's life, no ballooning (see
-# CLAUDE.md). The 6th (disk, in GiB) defaults to 256. The 7th (vCPUs)
-# defaults to 8 — fixed for the VM's life, same as RAM.
+# MiB) defaults to 16384 — fixed for the VM's life: the balloon is never
+# inflated, it only reports free pages back to the host (see "Memory
+# management" in CLAUDE.md). The 6th (disk, in GiB) defaults to 256. The
+# 7th (vCPUs) defaults to 8 — fixed for the VM's life, same as RAM.
 set -euo pipefail
 # readlink -f: resolve symlinks so $PWD below is the real folder. Invoked via a
 # symlink, bash keeps the logical path and virt-install would record that path
@@ -119,11 +120,17 @@ printf 'instance-id: %s-001\nlocal-hostname: %s\n' "$NAME" "$NAME" > "$TMP/meta-
 cloud-localds "$NAME-seed.img" "$TMP/user-data" "$TMP/meta-data"
 
 # ---- create ----------------------------------------------------------------
-info "Creating VM '$NAME' (${VCPUS} vCPU, ${MEM} MiB fixed RAM, ${DISK} GB disk, isolated network)"
+info "Creating VM '$NAME' (${VCPUS} vCPU, ${MEM} MiB fixed RAM + free-page reporting, ${DISK} GB disk, isolated network)"
+# --memory alone sets <memory> and <currentMemory> to the same value, so the
+# balloon starts EMPTY: the guest boots with all of $MEM and nothing ever
+# takes it away. freePageReporting is one-way — the guest hands back pages it
+# has on its free list, the host never asks for any. Do not add a setmem call
+# or boot with currentMemory < memory: that inflates the balloon and squeezes
+# the guest, which is what made the 2026-07-10 policy unstable.
 virt-install --connect qemu:///system \
   --name "$NAME" \
   --memory "$MEM" \
-  --memballoon model=none \
+  --memballoon model=virtio,freePageReporting=on,stats.period=10 \
   --vcpus "$VCPUS" \
   --disk "path=$PWD/$NAME.qcow2,format=qcow2,bus=virtio" \
   --disk "path=$PWD/$NAME-seed.img,format=raw,bus=virtio" \
