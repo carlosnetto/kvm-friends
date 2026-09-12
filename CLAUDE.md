@@ -390,6 +390,11 @@ host must be set up for it:
 
 ### Guests running k3s with Java workloads
 
+The guest-side counterpart to this section — what to change in a Helm chart
+so 30-60 JVMs behave inside a 32 GB VM — is written up separately in
+[HELMCHARTS.md](HELMCHARTS.md). What follows is the host-side view and the
+reasoning behind it.
+
 The 32 GB k3s VMs are the hard case for everything above, and the reason is
 worth stating plainly: **free page reporting can only hand back pages that
 are on the guest kernel's free list.** For a JVM the chain is GC frees
