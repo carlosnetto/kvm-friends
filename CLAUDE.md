@@ -122,8 +122,10 @@ sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='506'><all d
   isolate-guest.xml > /tmp/isolate-guest.xml
 
 # 2. Define the per-NIC packet filter. libvirt won't update an existing
-#    filter by name alone (needs a matching <uuid>) — undefine first; this
-#    fails loudly if a still-defined (even shut-off) VM references it.
+#    filter by name alone (needs a matching <uuid>) — undefine first. A
+#    *running* domain using the filter blocks the undefine; a shut-off one
+#    does not, even though it still references it (confirmed 2026-09-11
+#    with both VMs defined and off).
 virsh --connect qemu:///system nwfilter-undefine isolate-guest || true
 virsh --connect qemu:///system nwfilter-define /tmp/isolate-guest.xml
 

@@ -38,8 +38,8 @@ sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='506'><all d
 info "Defining nwfilter 'isolate-guest'"
 # libvirt won't update an existing filter by name alone (it requires a
 # matching <uuid>, which this template doesn't carry) — undefine first.
-# Fails loudly if a still-defined (even shut-off) VM references it; if so,
-# undefine that VM first or leave the old filter in place.
+# Only a *running* domain blocks the undefine, which the guard at the top
+# already rules out; a shut-off domain still referencing the filter is fine.
 V nwfilter-undefine isolate-guest >/dev/null 2>&1 || true
 V nwfilter-define "$TMP"
 
