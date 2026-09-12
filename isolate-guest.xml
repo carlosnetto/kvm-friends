@@ -5,22 +5,45 @@
     <udp dstportstart='67' dstportend='67'/>
   </rule>
 
-  <!-- Drop anything the VM *initiates* (state NEW) toward: the libvirt
-       bridge itself (the host's virbr0 address AND sibling VMs, both on
-       this /24 — matches default-net.xml), link-local, and CGNAT (covers
-       the host's Tailscale IP). state='NEW' keeps host-initiated SSH into
-       the VM working (replies are ESTABLISHED and pass). The placeholder
-       rule below is filled in by setup-network.sh at define time with
-       this host's own physical-NIC subnet (see CLAUDE.md, "Network
-       isolation"), so guests can't reach colo neighbors / other boxes on
-       that segment either — the exact range differs per host. -->
+  <!-- Drop anything the VM *initiates* (state NEW) toward anywhere the host
+       or its neighbours might live. state='NEW' keeps host-initiated SSH
+       into the VM working (replies are ESTABLISHED and pass).
+
+       Two kinds of rule, and BOTH are needed:
+
+       1. The blanket private ranges below. A host has more private
+          addresses than the one on its default-route NIC — docker0 is
+          usually 172.17.0.0/16, other bridges, VPNs and k8s CNIs add more,
+          and every one of those is a host-owned address a guest must not
+          reach. Blocking the whole of RFC1918 covers them without having
+          to enumerate interfaces that may not exist yet.
+       2. The placeholder rule below, filled in by setup-network.sh with
+          this host's actual default-route subnet. This is what the
+          blanket rules CANNOT cover: on a colo/VPS box the host sits on a
+          *public* /24 alongside other tenants (see the 2026-08-03 history
+          entry). On a host whose LAN is already private the computed rule
+          is redundant with the blanket ones, which is harmless.
+
+       The libvirt bridge gets its own explicit rule despite being inside
+       192.168.0.0/16: it is the one range guaranteed to matter (the host's
+       virbr0 address AND every sibling VM), and naming it separately keeps
+       that intent legible if the bridge is ever renumbered. -->
   <rule action='drop' direction='out' priority='500'>
     <all dstipaddr='192.168.122.0' dstipmask='24' state='NEW'/>
   </rule>
   <rule action='drop' direction='out' priority='501'>
-    <all dstipaddr='169.254.0.0' dstipmask='16' state='NEW'/>
+    <all dstipaddr='10.0.0.0' dstipmask='8' state='NEW'/>
   </rule>
   <rule action='drop' direction='out' priority='502'>
+    <all dstipaddr='172.16.0.0' dstipmask='12' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='503'>
+    <all dstipaddr='192.168.0.0' dstipmask='16' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='504'>
+    <all dstipaddr='169.254.0.0' dstipmask='16' state='NEW'/>
+  </rule>
+  <rule action='drop' direction='out' priority='505'>
     <all dstipaddr='100.64.0.0' dstipmask='10' state='NEW'/>
   </rule>
   @HOST_LAN_RULE@

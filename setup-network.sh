@@ -28,7 +28,11 @@ print(n.network_address, n.prefixlen)
 info "Host subnet on $IFACE: $NET/$BITS — guests will be blocked from it"
 
 TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
-sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='503'><all dstipaddr='$NET' dstipmask='$BITS' state='NEW'/></rule>|" \
+# priority 506: after the blanket private ranges in the template (500-505).
+# Redundant when this host's LAN is itself private — the point of the rule is
+# the colo/VPS case, where the host sits on a public /24 that no blanket
+# RFC1918 rule can cover.
+sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='506'><all dstipaddr='$NET' dstipmask='$BITS' state='NEW'/></rule>|" \
   isolate-guest.xml > "$TMP"
 
 info "Defining nwfilter 'isolate-guest'"

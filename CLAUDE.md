@@ -118,7 +118,7 @@ import ipaddress
 n = ipaddress.ip_interface('$CIDR').network
 print(n.network_address, n.prefixlen)
 ")
-sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='503'><all dstipaddr='$NET' dstipmask='$BITS' state='NEW'/></rule>|" \
+sed "s|@HOST_LAN_RULE@|<rule action='drop' direction='out' priority='506'><all dstipaddr='$NET' dstipmask='$BITS' state='NEW'/></rule>|" \
   isolate-guest.xml > /tmp/isolate-guest.xml
 
 # 2. Define the per-NIC packet filter. libvirt won't update an existing
@@ -140,13 +140,22 @@ virsh --connect qemu:///system net-start default
 What `isolate-guest.xml` does:
 
 - Allows only the DHCP exchange (UDP 67) toward the host.
-- Drops VM-**initiated** (`state='NEW'`) IPv4 to the libvirt bridge's own
-  subnet (192.168.122.0/24 — blocks both the host's bridge address and
-  sibling VMs), 169.254.0.0/16 (link-local), 100.64.0.0/10 (CGNAT — covers
-  the host's Tailscale IP), and the host's own local-network segment
-  (computed at setup time, see above). Everything else is accepted —
-  internet, Tailscale, and any tunnel a guest sets up are all unrestricted
-  egress.
+- Drops VM-**initiated** (`state='NEW'`) IPv4 to, in order: the libvirt
+  bridge's own subnet (192.168.122.0/24 — blocks both the host's bridge
+  address and sibling VMs), all three RFC1918 ranges, 169.254.0.0/16
+  (link-local), 100.64.0.0/10 (CGNAT — covers the host's Tailscale IP),
+  and the host's own local-network segment (computed at setup time, see
+  above). Everything else is accepted — internet, Tailscale, and any tunnel
+  a guest sets up are all unrestricted egress.
+- The blanket RFC1918 rules and the computed one solve **different**
+  problems and both are required. A host owns more private addresses than
+  the one on its default-route NIC: `docker0` is typically 172.17.0.0/16,
+  and other bridges, VPNs or CNIs add more — all of them host addresses a
+  guest must not reach, and none of them discoverable by looking at the
+  default route. The computed rule covers the opposite case, which no
+  RFC1918 rule can: a colo/VPS box whose NIC carries a **public** /24
+  shared with other tenants. Where the host's LAN is itself private the
+  computed rule is simply redundant.
 - Drops all IPv6 (the NAT net is v4-only; blocks fe80:: paths to the host).
 - Because drops match NEW only, **host → VM SSH still works** (replies are
   ESTABLISHED) — needed for setup and the manual Tailscale path. If a VM
@@ -1047,3 +1056,27 @@ its files aside as a cold backup rather than leaving them startable.
   memory preserved across the redefine, step ordering in three scenarios, and
   the modal's prefill plus no-op path), then read-only against libvirt — both
   live VMs correctly report `off`.
+- 2026-09-11: `isolate-guest.xml` regained the blanket RFC1918 rules that
+  the 2026-08-03 rewrite had removed, *alongside* the computed host-subnet
+  rule rather than instead of it. Found by auditing this host before
+  creating a VM: the filter actually defined here is still the pre-2026-08-03
+  static version, and comparing it against what `setup-network.sh` would now
+  generate showed that running the script would have **weakened** isolation.
+  This host has `docker0` at 172.17.0.1/16 with `ip_forward=1`; the old
+  blanket `172.16.0.0/12` rule covers it, while the regenerated filter would
+  have blocked only 192.168.122.0/24, the computed 192.168.68.0/22, link-local
+  and CGNAT — leaving a guest able to reach 172.17.0.1, which is a host
+  address. The 2026-08-03 change was right about the colo case (a public /24
+  on the NIC that no RFC1918 rule covers) but wrong to treat breadth and
+  precision as alternatives. The generated rule moved from priority 503 to
+  506 to sit after the blanket ones (500-505). Also fixed while testing: the
+  new template comment originally contained the literal `@HOST_LAN_RULE@`
+  token, so `sed` substituted it inside the comment as well — harmless to
+  XML parsing but it shipped a nonsense comment into every generated filter.
+  The token now appears exactly once in the file, asserted at edit time.
+  Verified by rendering the template for this host and parsing the result:
+  nine rules in priority order, `172.16.0.0/12` present. **Not applied** —
+  `setup-network.sh` refuses to run while a VM is running, and both VMs are
+  up; the filter currently defined here remains safe in the meantime because
+  its blanket `192.168.0.0/16` covers both this host's LAN (192.168.68.0/22)
+  and the bridge.
