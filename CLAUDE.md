@@ -601,6 +601,13 @@ nwfilter, the `default` network, the machine type and free space, and it
 verifies sha256 on both sides *before* defining the domain — a bad copy
 leaves nothing registered on the far side.
 
+The disk set it moves comes from the domain's own block list (`virsh
+domblklist`), not an assumed qcow2+seed pair, so it also works for a VM
+outside the create-vm.sh cloud-init recipe — e.g. a hand-built guest with a
+different disk layout (no seed, an empty cdrom slot). Every disk the domain
+actually uses must still live directly in this folder, per "Ground rules"
+above; one that doesn't is refused rather than silently skipped.
+
 **The VM keeps its Tailscale identity**, so once booted on the far side it
 answers on the same 100.x address and the friend notices nothing but the
 downtime. That is preserved by the *disk copy*, not by the XML:
@@ -1087,3 +1094,20 @@ its files aside as a cold backup rather than leaving them startable.
   up; the filter currently defined here remains safe in the meantime because
   its blanket `192.168.0.0/16` covers both this host's LAN (192.168.68.0/22)
   and the bridge.
+- 2026-09-15: `move-vm.sh` stopped assuming every VM has exactly a
+  `<name>.qcow2` + `<name>-seed.img` pair. It now reads the domain's actual
+  disk set from `virsh domblklist` (skipping cdrom slots with no source,
+  i.e. `-`), so it also covers a VM outside the create-vm.sh cloud-init
+  recipe. Prompted by a real failure: moving `win10` — a hand-built Windows
+  guest (no cloud-init, no seed disk, just a qcow2 and an empty cdrom slot)
+  — hit the hardcoded `$NAME-seed.img not found` check. Each discovered disk
+  must still resolve to a file directly in this folder (refused otherwise,
+  per "Ground rules"), and only qcow2-format disks get the backing-file/
+  `qemu-img check` pass — a raw disk is copied and hashed but not checked,
+  same as the seed image always was. Verified by dry-running the new
+  disk-discovery loop against the real `win10` domain on this host: it
+  correctly picked up `win10.qcow2` alone, skipped the sourceless cdrom, and
+  reported no backing file. Not yet exercised end to end (no second host
+  available in this session) — the disk-discovery and integrity-check
+  stages were verified directly; the transfer/define stages are unchanged
+  from the already-validated `vm-anac` move.

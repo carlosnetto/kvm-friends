@@ -52,10 +52,25 @@ RTARGET="$RUSER@$RHOST"
 V dominfo "$NAME" >/dev/null 2>&1 || err "no VM named '$NAME' on this host"
 [ "$RHOST" != "$(hostname)" ] || err "destination host is this host"
 
-QCOW=$NAME.qcow2; SEED=$NAME-seed.img; PASSF=$NAME-console-password.txt
-[ -f "$QCOW" ] || err "$QCOW not found in $SRC_DIR"
-[ -f "$SEED" ] || err "$SEED not found — the domain lists it as a second disk and will not start without it"
-FILES=("$QCOW" "$SEED")
+# Disk set comes from the domain's own block list, not an assumed
+# qcow2+seed pair — a VM outside the create-vm.sh cloud-init recipe (e.g. a
+# hand-built Windows guest) can have a different layout: no seed, an empty
+# cdrom slot ("-" as the source), extra disks. Every disk it actually uses
+# must live directly in this folder (Ground rules in CLAUDE.md).
+DISKS=()
+while IFS= read -r src; do
+  [ -n "$src" ] && [ "$src" != "-" ] || continue
+  REAL=$(readlink -f "$src") || err "cannot resolve disk path: $src"
+  [ -f "$REAL" ] || err "disk file listed on the domain but missing on disk: $src"
+  [ "$(dirname "$REAL")" = "$SRC_DIR" ] \
+    || err "'$NAME' has a disk outside $SRC_DIR ($REAL) — move it into this folder by hand first (Ground rules in CLAUDE.md)"
+  DISKS+=("$(basename "$REAL")")
+done < <(V domblklist "$NAME" | tail -n +3 | awk '{print $2}')
+[ "${#DISKS[@]}" -gt 0 ] || err "'$NAME' has no disk files to move"
+MAIN_DISK=${DISKS[0]}
+
+PASSF=$NAME-console-password.txt
+FILES=("${DISKS[@]}")
 if [ -f "$PASSF" ]; then FILES+=("$PASSF"); else
   echo "note: $PASSF not found — moving without it (serial-console login will have no known password)"
 fi
@@ -86,9 +101,10 @@ MACHINE=$(V dumpxml --inactive "$NAME" | grep -o "machine='[^']*'" | head -1 | c
 
 # Everything the destination must satisfy, gathered in one round trip. Each
 # is a start failure (or a silent corruption) if missing.
-REMOTE=$("${SSH[@]}" bash -s -- "$RPATH" "$NAME" "$MACHINE" "$TOTAL" <<'EOF'
+REMOTE=$("${SSH[@]}" bash -s -- "$RPATH" "$NAME" "$MACHINE" "$TOTAL" "${DISKS[@]}" <<'EOF'
 set -u
-RPATH=$1; NAME=$2; MACHINE=$3; NEED=$4
+RPATH=$1; NAME=$2; MACHINE=$3; NEED=$4; shift 4
+DISKS=("$@")
 say() { echo "$1=$2"; }
 V() { virsh --connect qemu:///system "$@"; }
 [ -d "$RPATH" ] || { say fatal "no such directory: $RPATH"; exit 0; }
@@ -106,7 +122,7 @@ FREE=$(df -P . | awk 'NR==2{print $4*1024}')
 say free "$FREE"
 say enough "$([ "$FREE" -gt "$NEED" ] && echo yes || echo no)"
 EX=
-for f in "$NAME.qcow2" "$NAME-seed.img"; do [ -e "$f" ] && EX="$EX $f"; done
+for f in "${DISKS[@]}"; do [ -e "$f" ] && EX="$EX $f"; done
 say existing "${EX# }"
 command -v tar >/dev/null && say tar yes || say tar no
 C=
@@ -186,12 +202,19 @@ fi
 # ---- integrity + XML -------------------------------------------------------
 # --inactive matters: dumping a running domain bakes this host's expanded CPU
 # features into the XML. (It is off by now, but be explicit.)
-info "Dumping domain XML and checking the disk"
+info "Dumping domain XML and checking ${#DISKS[@]} disk(s)"
 V dumpxml --inactive "$NAME" > "$SRC_DIR/$NAME.xml"
-qemu-img info "$QCOW" | grep -q '^backing file:' \
-  && err "$QCOW has a backing file — flatten it first (qemu-img convert), or the copy is not self-contained"
-qemu-img check "$QCOW" >/dev/null || err "qemu-img check failed on $QCOW — do not move a damaged image"
-echo "    no backing file, image consistent"
+for d in "${DISKS[@]}"; do
+  FMT=$(qemu-img info "$d" | awk -F': ' '/^file format:/{print $2}')
+  if [ "$FMT" = qcow2 ]; then
+    qemu-img info "$d" | grep -q '^backing file:' \
+      && err "$d has a backing file — flatten it first (qemu-img convert), or the copy is not self-contained"
+    qemu-img check "$d" >/dev/null || err "qemu-img check failed on $d — do not move a damaged image"
+    echo "    $d: no backing file, image consistent"
+  else
+    echo "    $d: $FMT, not checked (check is qcow2-only)"
+  fi
+done
 
 info "Hashing ${#FILES[@]} files locally ($(human "$TOTAL"))"
 LOCAL_SUMS=$(sha256sum "${FILES[@]}")
@@ -225,7 +248,7 @@ sed "s#$SRC_DIR/#$RPATH/#g" "$SRC_DIR/$NAME.xml" \
 if [ -n "$RETIRE" ]; then
   info "Retiring the source domain (files kept)"
   V undefine "$NAME"
-  echo "    domain undefined here; $QCOW and friends left in place as a cold backup"
+  echo "    domain undefined here; $MAIN_DISK and friends left in place as a cold backup"
 fi
 
 # ---- summary ----------------------------------------------------------------
@@ -234,15 +257,16 @@ cat <<EOF
     It is defined and shut off there. Start it from vm-tui.py on $RHOST,
     or:  ssh $RTARGET "virsh --connect qemu:///system start $NAME"
 
-    It keeps its UUID, MAC, and Tailscale identity, so once booted it
-    answers on the SAME Tailscale IP as before. Expect a new
-    192.168.122.x lease — that is normal and does not matter.
+    It keeps its UUID and MAC. If it runs Tailscale, that identity is
+    preserved too (tailscaled's state lives on the disk), so it answers on
+    the SAME Tailscale IP as before. Expect a new 192.168.122.x lease —
+    that is normal and does not matter.
 EOF
 if [ -n "$RETIRE" ]; then
   cat <<EOF
 
     The source domain is undefined. Its files are still here as a backup:
-      $SRC_DIR/$QCOW
+$(printf '      %s/%s\n' "$SRC_DIR" "${DISKS[@]}")
     Delete them once you trust the move.
 EOF
 else
