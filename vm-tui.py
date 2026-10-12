@@ -32,7 +32,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select
 
 MEM_OPTIONS = [("512 MB", 512), ("1 GB", 1024), ("2 GB", 2048), ("4 GB", 4096),
-               ("8 GB", 8192), ("16 GB", 16384)] + [
+               ("8 GB", 8192), ("16 GB", 16384), ("20 GB", 20480)] + [
                   (f"{gb} GB", gb * 1024) for gb in range(24, 33)]
 DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
 VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8), ("12", 12), ("16", 16)]
