@@ -494,8 +494,9 @@ growing and **lowers the value before the ceiling** when shrinking. The
 other order asks libvirt for a state where the value exceeds its ceiling.
 A failing step aborts the rest rather than leaving a half-applied config.
 
-Sizing up is still bounded by real hardware — see the `free -h` warning
-under "Memory management". The TUI does not check this for you.
+Sizing up is still bounded by real hardware — see "Overcommitting the
+host, and sizing swap for it" under "Memory management". The TUI does not
+check this for you.
 
 ## Tailscale (manual path, when no pre-auth key)
 
@@ -519,13 +520,14 @@ non-pty SSH command. Only the "up" step is manual:
 ## Day-to-day: starting and stopping VMs
 
 `./vm-tui.py` is the interactive front end — a list of every VM with
-single-key start (`s`), graceful shutdown (`h`), force off (`f`, confirmed),
-serial console (`c`), resize (`e`, shut-off VMs only — see "Editing a VM's
-CPU and RAM" above) and move to another host (`m`, see "Moving a VM to
-another host" below). It is a Textual app run through uv: the PEP 723
-metadata block at the top of the script declares `requires-python` and
-`textual`, and `uv run` builds a cached environment on first use, so there
-is nothing to pip-install. A new host needs `uv` and Python 3.13
+single-key create (`n`), start (`s`), graceful shutdown (`h`), force off
+(`f`, confirmed), serial console (`c`), edit (`e`, shut-off VMs only — see
+"Editing a VM's CPU, RAM and balloon" above), move to another host (`m`,
+see "Moving a VM to another host" below) and destroy (`d`, retype the
+name). It is a Textual app run through uv: the PEP 723 metadata block at
+the top of the script declares `requires-python` and `textual`, and
+`uv run` builds a cached environment on first use, so there is nothing to
+pip-install. A new host needs `uv` and Python 3.13
 (`brew install uv python@3.13`).
 
 Equivalent one-liners:
@@ -552,6 +554,24 @@ virsh --connect qemu:///system undefine ${NAME}
 rm ./${NAME}.qcow2 ./${NAME}-seed.img ./${NAME}-console-password.txt
 ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
 ```
+
+## Optional: restricting the host's own SSH to Tailscale
+
+`./harden-host.sh` locks down the **host's** sshd (not the guests'):
+password auth is off, and ufw default-denies inbound with SSH allowed only
+on `tailscale0` — with ufw's forward policy forced to ACCEPT so libvirt's
+own NAT rules for the VMs keep working. The machine's physical console —
+or, on a rented server, the provider's out-of-band KVM/IPMI console — is
+the sole fallback if Tailscale is ever unreachable. Console/`sudo` passwords are untouched. It
+refuses to run unless `tailscale0` is up and the current session is
+already coming in over Tailscale (or the local console), so it cannot
+sever the session running it. Idempotent.
+
+Any bare-metal Ubuntu 24.04 machine works as a host — the current ones run
+Lubuntu 24.04, and a rented ReliableSite dedicated server has too. Notes
+for that provider (its v2 REST API, its quirks, an outage runbook) live in
+`reliablesite/README.md`, with a read-only status script alongside
+(`reliablesite/rs_status.py`); not in use right now, but still valid.
 
 ## Moving the folder to another disk
 
@@ -621,7 +641,7 @@ Separately, the XML is redefined rather than rebuilt, so **name, UUID and
 MAC** survive too — the MAC because cloud-init pinned it into the guest's
 netplan `match:` rule (a fresh one boots the VM with no network), the rest
 because anything keyed on them should still match. The only thing the
-script changes in the XML is the two absolute disk paths.
+script changes in the XML is the absolute disk paths.
 
 The flip side of a portable identity is that it must not be duplicated: two
 copies of the same disk share one node key and would fight over it. That is
@@ -629,11 +649,9 @@ why nothing is deleted here and the source is left defined but flagged —
 see `--retire-source`.
 
 Different from moving the *folder*: here one VM leaves this host for a
-different machine, and everything inside it must survive — same
-filesystem, same SSH host keys, same **Tailscale identity**
-(`/var/lib/tailscale/tailscaled.state` lives on the disk), so the friend
-keeps the same 100.x address and notices nothing but the downtime. What is
-*not* preserved is RAM state: running processes, open connections, uptime.
+different machine. The disk — filesystem, SSH host keys, Tailscale state —
+survives byte for byte; what is *not* preserved is RAM state: running
+processes, open connections, uptime.
 
 Shut the VM down cleanly — **never move a `virsh save` / `managedsave`
 state file.** Saved RAM state is tied to the exact QEMU build, machine type
@@ -702,7 +720,7 @@ ssh -A cnetto@<src> "scp -p $NAME.qcow2 $NAME-seed.img \
 ```
 
 `rsync -aHAX --sparse` is better when it is available on **both** ends
-(rsync-over-ssh runs rsync remotely too) — reliablesite does not have it.
+(rsync-over-ssh runs rsync remotely too) — not every host has had it.
 `scp -p` is the fallback and preserves the `600` on the password file;
 sparseness is not a concern in practice, since these qcow2 files are
 compact rather than hole-punched (`du` and `du --apparent-size` agree).
@@ -1111,3 +1129,16 @@ its files aside as a cold backup rather than leaving them startable.
   available in this session) — the disk-discovery and integrity-check
   stages were verified directly; the transfer/define stages are unchanged
   from the already-validated `vm-anac` move.
+- 2026-10-12: doc audit on `msa2-01-ord` — README and this file caught up
+  with the repo. README's file table gained `move-vm.sh`, `harden-host.sh`,
+  `HELMCHARTS.md` and `reliablesite/`, and its `vm-tui.py` key table gained
+  `n`/`e`/`m`/`d`; "Where this lives" no longer describes `reliablesite`
+  as *the* host — any bare-metal Ubuntu 24.04 machine qualifies; the
+  current ones run Lubuntu 24.04, and ReliableSite remains a valid option
+  though not in use right now. Stale wording fixed (the
+  filter blocks the host's local segment, not a "home network"; Tailscale
+  is installed by `create-vm.sh`, only `up` is manual). Here: two dangling
+  cross-references repaired (a `free -h` warning that no longer exists; an
+  old section title), a duplicated Tailscale-identity paragraph in "Moving
+  a VM to another host" trimmed, and a short section added for
+  `harden-host.sh` and `reliablesite/`, which were tracked but undocumented.
