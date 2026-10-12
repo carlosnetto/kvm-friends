@@ -1145,3 +1145,4 @@ its files aside as a cold backup rather than leaving them startable.
 - 2026-10-12: RAM menu in `vm-tui.py` (create and edit forms share
   `MEM_OPTIONS`) now offers every whole GB from 24 to 32 instead of jumping
   24 -> 32, for finer sizing of the large k3s VMs on an overbooked host.
+  20 GB added between 16 and 24 as well.
