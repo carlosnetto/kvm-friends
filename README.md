@@ -15,11 +15,14 @@ base image are gitignored and stay local.
 
 ## Where this lives, and why
 
-This host (`reliablesite`, a colo box) is a single-disk machine: one 1.8 TB
-NVMe, one LVM root volume, nothing else to segregate VMs onto. The folder
-is `$KVM_FRIENDS` (`$HOME/kvm-friends` on this particular host), and VM
-disks share that same volume with the host OS — there's no dedicated
-secondary drive here.
+Any bare-metal machine running Ubuntu 24.04 LTS (or a flavour of it) can
+host these VMs, and they move between hosts with `move-vm.sh`. The current
+hosts run Lubuntu 24.04; a rented dedicated server such as ReliableSite's
+works the same way. The hosts so far have been single-disk machines —
+e.g. `msa2-01-ord` is one 1.8 TB NVMe with a single root partition — so
+the folder (`$KVM_FRIENDS`, e.g. `$HOME/Git/kvm-friends`) and every VM
+disk share one volume with the host OS, with no dedicated secondary drive.
+The host's desktop, if any, is irrelevant to the VMs, which stay headless.
 
 The trade-offs are accepted, not overlooked:
 
@@ -45,13 +48,17 @@ Versioned (in git):
 |---|---|
 | `setup-host.sh` | One-time host setup: installs the KVM/libvirt stack (apt) plus uv/Python 3.13 (brew), assuming a virgin machine. Idempotent. |
 | `create-vm.sh` | Creates a VM end to end: prompts for name/login/key (optional Tailscale pre-auth key, RAM, disk size), builds and boots it, runs the isolation check, sets up Tailscale. |
-| `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM, starts/stops them with single keys, resizes a shut-off VM's CPU and RAM (`e`), and moves a VM to another host (`m`). Run `./vm-tui.py`; uv builds its environment on first run. |
+| `vm-tui.py` | **Interactive console — start this if you don't want to remember commands.** Lists every VM; creates (`n`), starts/stops, edits a shut-off VM's CPU, RAM and balloon (`e`), moves (`m`) and destroys (`d`) them with single keys. Run `./vm-tui.py`; uv builds its environment on first run. |
 | `list-vm.sh` | One-line overview per VM: state, IP, vCPUs, RAM current/max, disk used. Same data as `vm-tui.py`, for scripts and pipes. |
 | `destroy-vm.sh` | Destroys a VM and all its files (asks you to retype the name; `--yes` to skip). |
+| `move-vm.sh` | Moves a VM to another host: pre-flight on the destination, clean shutdown, stream, sha256 verify, redefine there. Never deletes anything on the source. |
+| `harden-host.sh` | Optional host hardening: restricts the host's own SSH to Tailscale only (password auth off), leaving the provider's out-of-band console as the fallback. Refuses to run unless the current session is already over Tailscale. Idempotent. |
 | `setup-network.sh` | One-time network isolation setup: defines the nwfilter and replaces the default network. Computes this host's own subnet fresh each run. Refuses to run while a VM is running. |
 | `isolate-guest.xml` | libvirt nwfilter applied to every VM's NIC: internet-only egress, no access to the host's local network segment, the host itself, or other VMs. |
 | `default-net.xml` | The libvirt NAT network with host DNS disabled — VMs get public DNS (1.1.1.1 / 9.9.9.9) via DHCP. |
-| `CLAUDE.md` | The operational recipe: host bootstrap, VM creation, handoff, teardown. |
+| `CLAUDE.md` | The operational recipe: host bootstrap, VM creation, memory/CPU policy, handoff, teardown, moves. |
+| `HELMCHARTS.md` | Guest-side companion for k3s VMs running Java: memory limits, heap sizing and JVM flags in Helm values. |
+| `reliablesite/` | Notes on the API of ReliableSite (a dedicated-server provider; not in use right now, but a valid host) plus a read-only status script (`rs_status.py`). |
 
 Local only (gitignored):
 
@@ -71,8 +78,9 @@ Local only (gitignored):
 3. `virt-install` with `--import`, `--graphics none`, serial console only,
    NAT network. The VM boots ready in under a minute — no installer runs.
 4. The VM's network is **internet-only**: a packet filter on its virtual NIC
-   blocks all access to Carlos's home network and to the host machine. You
-   reach the VM over Tailscale; the VM reaches only the outside world.
+   blocks all access to the host machine, its local network segment and
+   the other VMs. You reach the VM over
+   Tailscale; the VM reaches only the outside world.
 
 ## What I need from you (the friend) in advance
 
@@ -109,8 +117,9 @@ tailnet needs their approval. Two ways:
 - **With pre-auth key (preferred):** cloud-init installs Tailscale and runs
   `tailscale up --auth-key=tskey-...` at first boot. The VM appears in the
   friend's tailnet immediately.
-- **Manual:** Carlos SSHes in (his temporary key), installs Tailscale, runs
-  `sudo tailscale up`, and sends the friend the login URL it prints. The
+- **Manual:** Tailscale is already installed by the setup script; Carlos
+  SSHes in (his temporary key), runs `sudo tailscale up`, and sends the
+  friend the login URL it prints. The
   friend approves it in the browser against **their own** Tailscale account.
 
 ## Handoff — making the machine truly the friend's
@@ -139,10 +148,14 @@ cd "$KVM_FRIENDS"
 
 | Key | Does |
 |---|---|
+| `n` | Create a new VM (form: name, login, SSH key, optional Tailscale key, RAM, disk, vCPUs). |
 | `s` | Start the selected VM (this is how you wake a dormant one). |
 | `h` | Graceful shutdown — asks the guest to power off cleanly. |
 | `f` | Force off. Like pulling the plug; asks for confirmation first. |
 | `c` | Attach to the serial console (`Ctrl+]` to detach). |
+| `e` | Edit vCPUs, RAM and free-page reporting — shut-off VMs only. |
+| `m` | Move the VM to another host (runs `move-vm.sh`). |
+| `d` | Destroy the VM and its files; asks you to retype the name. |
 | `r` | Refresh now (it also refreshes itself every 5 s). |
 | `q` | Quit. |
 
