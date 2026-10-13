@@ -462,6 +462,93 @@ virsh --connect qemu:///system setvcpus ${NAME} 16 --config
 virsh --connect qemu:///system start ${NAME}
 ```
 
+## Storage: slot map and measured speeds (msa1-01-vcp only)
+
+Unlike the rest of this file, this section is **specific to one host** and
+does not travel. It is here because two numbers below bound things the VM
+policy depends on — how fast a swapped-out VM faults back in, and how fast
+the VM disks actually are — and because the slot map is **not
+rediscoverable from software**: an empty PCIe port disappears from the PCI
+tree entirely, so the only way to learn a slot's capability is to put a
+drive in it. Re-measure on any other host rather than assuming these
+figures.
+
+Measured 2026-09-17 with fio 3.36, file-based, `O_DIRECT`, 4 GiB scratch
+file, no VMs running.
+
+### Slot map — MS-A1 (Ryzen 9 9950X), four M.2 slots
+
+| Port | Capability | Measured | Holds |
+|---|---|---|---|
+| `00:02.2` | **Gen5 x4** (32 GT/s) | best | Samsung 990 PRO — `/`, swapfile |
+| `00:01.2` | Gen4 x4 (16 GT/s), back of case | 9-22% slower than `02.2` under load | Bestoss GM888 — `/disk/1`, VM disks |
+| `00:01.7` | Gen3 x4 (8 GT/s) | caps ~3.9 GB/s | empty |
+| `00:01.6` | Gen4 **x1** | caps ~2 GB/s | empty |
+
+`00:01.3/4/5` are x1 and carry the Wi-Fi card and the two 2.5GbE NICs.
+
+Two traps this cost real time to find:
+
+- **`00:01.6` is wired x1 by the board**, not mis-seated. The 990 PRO
+  started there and ran at a quarter of its speed. Always check
+  `current_link_width` after moving a drive:
+  ```bash
+  for d in /sys/block/nvme*n1; do dev=$(readlink -f $d/device/device); \
+    echo "$(cat $d/device/model|xargs): $(cat $dev/current_link_speed) x$(cat $dev/current_link_width)"; done
+  ```
+- **`02.2` and `01.2` both train at Gen4 x4 but are not equivalent.** The
+  same drive measured 9-22% slower in `01.2` on every loaded test. `02.2`
+  is also the only Gen5-capable port, so it is where a future Gen5 drive
+  belongs.
+
+### The drives
+
+| | Samsung 990 PRO (`02.2`) | Bestoss GM888 (`01.2`) |
+|---|---|---|
+| Seq read / write, 1M QD8 | **7,507** / **6,856** MB/s | 6,614 / 3,730 MB/s |
+| Rand read 4K QD32 | 616K IOPS, p99 95 us | 415K IOPS, p99 297 us |
+| Rand write 4K QD32 | 582K IOPS, p99 **61 us** | 298K IOPS, p99 **930 us** |
+| Rand read 4K QD1 | 22K IOPS, p99 47 us | 16K IOPS, p99 63 us |
+| Rand write 4K QD1 | 71K IOPS, p99 14 us | 66K IOPS, p99 23 us |
+| **Sustained** write, 5 min | **1,364 MB/s** | 684 MB/s (dipping to 292) |
+| Temp under that load | 41 -> 54 C | flat 39 C |
+
+The Samsung wins every test. The VM disks are nonetheless on the Bestoss,
+which is the one thing still upside-down here — the Samsung has ~787 GB
+free, and "Moving the folder to another disk" above is the procedure.
+
+### What the numbers mean for the VM policy
+
+- **Faulting a swapped-out VM back in** is random reads at moderate queue
+  depth: 616K IOPS ~= 2.4 GB/s, so a 32 GB guest needs ~13 s of pure I/O at
+  best, and longer in practice. That is the "sluggish minute or two" in
+  "Overcommitting the host" measured rather than guessed.
+- **Swap-out is sequential writes at 1.4 GB/s sustained**, not the 6.9 GB/s
+  burst figure — the burst number only holds until the SLC cache fills.
+- **Sustained write collapse is cache exhaustion, not heat.** Both drives
+  fall to a third or a half of their burst speed after ~30 s of continuous
+  writing. The Samsung peaked at 54 C against a throttle threshold in the
+  low 80s, so cooling is not the lever; tightening the heatsinks changed
+  nothing measurable.
+- **Small random I/O is drive-bound, not bus-bound.** QD1 figures barely
+  moved across x1, Gen3 x4 and Gen4 x4 — which is why the x1 slot, bad as
+  it was, did not hurt swap as much as its sequential numbers suggested.
+
+### Reproducing
+
+```bash
+fio --name=t --directory=<dir> --filename=bench.dat --size=4G \
+    --rw=randread --bs=4k --iodepth=32 --numjobs=1 --ioengine=libaio \
+    --direct=1 --time_based --runtime=15 --ramp_time=2 --group_reporting
+```
+
+Vary `--rw` (read/write/randread/randwrite), `--bs` (1M/4k) and
+`--iodepth` (8/32/1). For the sustained run use `--size=100G
+--runtime=300`; note that costs ~1-2 TB of writes per drive, which is real
+endurance. `/tmp` is tmpfs on this host — benchmark under `$HOME` to hit
+the root drive. Scripts and raw JSON from this run are in
+`~/fio-baseline/` (outside the repo; not committed).
+
 ## Editing a VM's CPU, RAM and balloon
 
 `./vm-tui.py` does all three in one place: select a VM and press `e`. The
@@ -1129,6 +1216,31 @@ its files aside as a cold backup rather than leaving them startable.
   available in this session) — the disk-discovery and integrity-check
   stages were verified directly; the transfer/define stages are unchanged
   from the already-validated `vm-anac` move.
+- 2026-09-17: benchmarked both NVMe drives after noticing the Samsung
+  990 PRO was linked at **PCIe 4.0 x1** — the board wires port `00:01.6`
+  that way, so it was not a seating fault. Moving it to `00:01.7` (Gen3 x4)
+  doubled sequential reads, and moving it again to `00:02.2` (Gen5-capable
+  x4) took it to 7.5 GB/s read / 6.9 GB/s write, 4x and 6x the original
+  figures. The Bestoss GM888 went to the previously-unknown fourth slot at
+  the back of the case (`00:01.2`, Gen4 x4), where it measured 9-22% slower
+  under load than in `02.2` despite an identical trained link — the reason
+  is unexplained, and worth remembering before treating two Gen4 x4 slots
+  as interchangeable. Full slot map, per-drive numbers and the reproduce
+  recipe are in "Storage: slot map and measured speeds" above; that section
+  is explicitly host-specific, unlike the rest of this file, and is written
+  down because **an empty PCIe port vanishes from the PCI tree**, so slot
+  capability cannot be rediscovered without physically moving a drive.
+  Findings worth carrying to other hosts: small random I/O barely changed
+  across x1, Gen3 x4 and Gen4 x4 (drive-bound, not bus-bound), so a narrow
+  link hurts swap far less than its sequential numbers suggest; and the
+  5-minute sustained write test showed both drives collapsing to a third or
+  half of burst speed within ~30 s, which is SLC-cache exhaustion and
+  **not** thermal — the Samsung peaked at 54 C against a throttle point in
+  the low 80s, and tightening the heatsinks made no measurable difference.
+  The planning figure for swap-out is therefore 1.4 GB/s sustained, not the
+  6.9 GB/s burst number. Still upside-down after all this: the VM disks live
+  on the Bestoss, the slower drive on the slower slot, while the Samsung has
+  ~787 GB free.
 - 2026-10-12: doc audit on `msa2-01-ord` — README and this file caught up
   with the repo. README's file table gained `move-vm.sh`, `harden-host.sh`,
   `HELMCHARTS.md` and `reliablesite/`, and its `vm-tui.py` key table gained
