@@ -37,8 +37,8 @@ this file.
   attribute, switchable on an existing VM while it is shut off — `e` in
   `./vm-tui.py`. See "Memory management" below for resizing, overcommit and
   host swap sizing.
-- CPU: fixed vCPUs, chosen at creation time (1, 4, 8, 12 or 16 — the host
-  has 32 threads). Defaults to 8.
+- CPU: fixed vCPUs, chosen at creation time (1, 4, or any even count from
+  8 to 20 — the host has 32 threads). Defaults to 8.
 - SSH password auth is always disabled (`ssh_pwauth: false`); access is by
   public key only.
 - Use `--connect qemu:///system` for all virsh/virt-install commands.
@@ -183,7 +183,7 @@ FRIEND=joao             # login name
 FRIEND_KEY='ssh-ed25519 AAAA... friend'
 MEM=16384               # RAM, MiB
 DISK=256                # disk, GiB
-VCPUS=8                 # vCPUs (1/4/8/12/16 in the TUI; any positive integer by hand)
+VCPUS=8                 # vCPUs (1/4/8/10/.../20 in the TUI; any positive integer by hand)
 
 cp noble-server-cloudimg-amd64.img ${NAME}.qcow2
 qemu-img resize ${NAME}.qcow2 ${DISK}G
@@ -448,10 +448,10 @@ just do not count its savings toward a memory budget.
 
 ## CPU management
 
-Every VM gets a fixed vCPU count chosen at creation time (1, 4, 8, 12 or 16
-in the TUI; defaults to 8). There is no time cap within them — a VM can run
-all of its vCPUs at 100%; with 32 host threads that's acceptable even at 16,
-though unlike RAM these are not reserved — vCPUs across VMs may total more
+Every VM gets a fixed vCPU count chosen at creation time (1, 4, or any even
+count from 8 to 20 in the TUI; defaults to 8). There is no time cap within
+them — a VM can run all of its vCPUs at 100%; with 32 host threads that's
+acceptable even at 20, though unlike RAM these are not reserved — vCPUs across VMs may total more
 than the host has, and they simply contend. Changing the count later needs a
 shutdown:
 
@@ -1258,3 +1258,6 @@ its files aside as a cold backup rather than leaving them startable.
   `MEM_OPTIONS`) now offers every whole GB from 24 to 32 instead of jumping
   24 -> 32, for finer sizing of the large k3s VMs on an overbooked host.
   20 GB added between 16 and 24 as well.
+- 2026-10-13: vCPU menu in `vm-tui.py` (create and edit forms share
+  `VCPU_OPTIONS`) now offers every even count from 8 to 20 (8, 10, ... 20)
+  above the existing 1 and 4, instead of 8/12/16 only. Still defaults to 8.

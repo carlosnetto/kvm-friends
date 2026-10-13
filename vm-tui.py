@@ -35,7 +35,7 @@ MEM_OPTIONS = [("512 MB", 512), ("1 GB", 1024), ("2 GB", 2048), ("4 GB", 4096),
                ("8 GB", 8192), ("16 GB", 16384), ("20 GB", 20480)] + [
                   (f"{gb} GB", gb * 1024) for gb in range(24, 33)]
 DISK_OPTIONS = [("128 GB", 128), ("256 GB", 256), ("512 GB", 512), ("1 TB", 1024)]
-VCPU_OPTIONS = [("1", 1), ("4", 4), ("8", 8), ("12", 12), ("16", 16)]
+VCPU_OPTIONS = [("1", 1), ("4", 4)] + [(str(n), n) for n in range(8, 21, 2)]
 RETIRE_OPTIONS = [("leave this VM defined here (safer)", False),
                   ("undefine it here — keeps the disk as a backup", True)]
 # The balloon is never inflated either way — "on" only lets the guest hand
