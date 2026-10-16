@@ -169,8 +169,14 @@ GW=$(ip route show default | awk '{print $3; exit}')
   && err "VM can reach the LAN gateway ($GW) — filter NOT working, stop here"
 "${SSH[@]}" "ping -c1 -W2 192.168.122.1 >/dev/null 2>&1" \
   && err "VM can reach the host — filter NOT working, stop here"
-"${SSH[@]}" "curl -sI --max-time 10 https://ubuntu.com >/dev/null" \
-  || err "VM has no internet access"
+# Retried: SSH answers before the guest's network/DNS is fully up, so a
+# single early attempt can fail on a VM that is actually fine.
+ok=
+for _ in $(seq 1 12); do
+  if "${SSH[@]}" "curl -sI --max-time 10 https://ubuntu.com >/dev/null"; then ok=1; break; fi
+  sleep 5
+done
+[ -n "$ok" ] || err "VM has no internet access (tried for ~2 min)"
 echo "    LAN blocked, host blocked, internet OK"
 
 # ---- tailscale ---------------------------------------------------------------
