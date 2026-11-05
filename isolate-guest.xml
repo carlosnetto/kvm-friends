@@ -5,6 +5,15 @@
     <udp dstportstart='67' dstportend='67'/>
   </rule>
 
+  <!-- The one LAN exception, filled in by setup-network.sh (the derp option, <ip>): a
+       private Tailscale DERP relay on this LAN (TCP 443 for DERP, UDP 3478 for
+       STUN). Priority 400-401 is before the private-range drops (500+), so a
+       guest may open exactly these two ports on exactly that address and
+       nothing else on the LAN. Without the derp option the placeholder is empty and
+       isolation is total, as before. The relay serves only the tailnet
+       (derper, verify-clients mode) and sees only WireGuard ciphertext. -->
+  @DERP_RULES@
+
   <!-- Drop anything the VM *initiates* (state NEW) toward anywhere the host
        or its neighbours might live. state='NEW' keeps host-initiated SSH
        into the VM working (replies are ESTABLISHED and pass).

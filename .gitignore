@@ -18,3 +18,5 @@ vm-*.xml.orig
 
 # Python bytecode from vm-tui.py
 __pycache__/
+# DERP relay binary (setup-derper.sh; built with go install, ~26 MB)
+/derper

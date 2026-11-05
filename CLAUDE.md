@@ -1261,3 +1261,39 @@ its files aside as a cold backup rather than leaving them startable.
 - 2026-10-13: vCPU menu in `vm-tui.py` (create and edit forms share
   `VCPU_OPTIONS`) now offers every even count from 8 to 20 (8, 10, ... 20)
   above the existing 1 and 4, instead of 8/12/16 only. Still defaults to 8.
+
+## Private DERP relay (optional)
+
+Isolated guests talk to each other only over Tailscale. Guests on **different hosts** sit behind
+two NATs (the host's libvirt NAT and the site router), so Tailscale cannot open a direct path and
+relays every byte through a **public** DERP server over the internet (`tailscale ping <peer>` shows
+`via DERP(ord)` and ~1 s round trips). A relay on the LAN keeps that traffic local. It is an
+exception to isolation, kept as narrow as possible: guests may open **tcp/443 and udp/3478 to the
+relay's LAN address only**, outbound; nothing reaches into a guest; the relay serves only this
+tailnet (`--verify-clients`) and only ever sees WireGuard ciphertext.
+
+```bash
+# 1. On the relay host (once). Build the binary to match its tailscale version, then:
+GOBIN="$KVM_FRIENDS" go install tailscale.com/cmd/derper@v$(tailscale version | head -1)
+sudo ./setup-derper.sh                      # or: --allow <cidr> ... (default: LAN + its guests)
+
+# 2. Tailnet policy (admin console → Access controls → JSON editor): a top-level "derpMap".
+#    Public relays stay available; each node picks the relay it reaches fastest, so guests on this
+#    LAN choose this one and nodes elsewhere keep the public ones.
+#      "derpMap": {"Regions": {"900": {"RegionID": 900, "RegionCode": "chi-lan",
+#        "RegionName": "Chicago LAN", "Nodes": [{"Name": "900a", "RegionID": 900,
+#        "HostName": "<relay host>.<tailnet>.ts.net", "IPv4": "<relay LAN ip>",
+#        "DERPPort": 443, "STUNPort": 3478}]}}}
+
+# 3. On EVERY host whose guests should use it (the relay host included). Updates the filter live
+#    on running guests; remembered per host; --no-derp removes it.
+./setup-network.sh --derp <relay LAN ip>
+
+# Check from a guest: the relay is reachable, and peers on other hosts now go via it.
+curl -s -o /dev/null -w '%{http_code}\n' --resolve <relay host>:443:<relay LAN ip> https://<relay host>/
+tailscale ping -c 3 <peer>        # → via DERP(chi-lan), milliseconds
+```
+
+The exception applies to every guest on a host that runs `--derp`, including other people's VMs:
+they can reach the relay's two ports but cannot use it (`--verify-clients`), and still nothing else
+on the LAN.
