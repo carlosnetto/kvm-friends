@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # harden-host.sh — key-only SSH, and ufw default-deny inbound with two ways in:
-#   - Tailscale (tailscale0), always;
+#   - Tailscale (tailscale0), when this host runs it (not every host does);
 #   - this host's own LAN, when that LAN is PRIVATE (RFC1918, behind a router):
 #     everything inbound from it, so the host is reachable like any machine on
 #     the LAN. On a colo/VPS box whose NIC sits on a PUBLIC subnet (other
 #     tenants) the LAN rule is skipped and the host stays Tailscale-only, with
-#     the provider's out-of-band KVM/IPMI console as the fallback.
+#     the provider's out-of-band KVM/IPMI console as the fallback — so a host
+#     with NEITHER Tailscale NOR a private LAN is refused: it would lock you out.
 # This firewall protects the host from the network. It is NOT what isolates the
 # guests: isolate-guest (setup-network.sh) drops every connection a guest opens
 # to the host, its LAN and every private range, before it reaches ufw.
@@ -37,14 +38,19 @@ print(n, 'yes' if private else 'no')
 ")
 
 # ---- 0. Safety checks -------------------------------------------------
-# Refuse to run at all unless Tailscale is actually up and this very
-# session is coming in over it, over the private LAN (which stays open), or
-# from the local/KVM console — otherwise this script would sever the session
-# running it.
-ip link show "$TS_IFACE" >/dev/null 2>&1 \
-  || err "no $TS_IFACE interface — run 'tailscale up' first, or this would lock you out"
-TS_IP=$(tailscale ip -4 2>/dev/null) \
-  || err "tailscale not responding — bring it up first"
+# Refuse to run unless at least one way in stays open (Tailscale, or the
+# private LAN) and this very session is coming in over one of them, or from the
+# local/KVM console — otherwise this script would sever the session running it.
+HAS_TS=no; TS_IP=""
+if ip link show "$TS_IFACE" >/dev/null 2>&1; then
+  TS_IP=$(tailscale ip -4 2>/dev/null) \
+    || err "$TS_IFACE exists but tailscale is not responding — bring it up first"
+  HAS_TS=yes
+fi
+if [ "$HAS_TS" = no ] && [ "$LAN_PRIVATE" != yes ]; then
+  err "no $TS_IFACE and $IFACE is on a PUBLIC subnet ($LAN) — nothing would stay open; run 'tailscale up' first"
+fi
+[ "$HAS_TS" = yes ] || info "No Tailscale on this host — it will be reachable from the private LAN $LAN only"
 
 CONN_SRC=$(who am i 2>/dev/null | grep -oP '\(\K[^)]+' || true)
 if [ -n "$CONN_SRC" ]; then
@@ -55,11 +61,11 @@ try:
 except ValueError:
     print('no')
 else:
-    ok = ip in ipaddress.ip_network('100.64.0.0/10') or ('$LAN_PRIVATE' == 'yes' and ip in ipaddress.ip_network('$LAN'))
+    ok = ('$HAS_TS' == 'yes' and ip in ipaddress.ip_network('100.64.0.0/10')) or ('$LAN_PRIVATE' == 'yes' and ip in ipaddress.ip_network('$LAN'))
     print('yes' if ok else 'no')
 ")
   [ "$ON_TS" = yes ] \
-    || err "this session's source ($CONN_SRC) is neither Tailscale nor the private LAN — reconnect via $TS_IP first, or you will lock yourself out"
+    || err "this session's source ($CONN_SRC) is neither Tailscale nor the private LAN — reconnect over one of them first, or you will lock yourself out"
   info "Session confirmed on Tailscale or the private LAN (source $CONN_SRC)"
 else
   info "No remote source detected (local/console session) — proceeding"
@@ -74,7 +80,7 @@ PermitRootLogin no
 EOF
 sudo systemctl reload ssh
 
-# ---- 2. Firewall: default-deny inbound; SSH on tailscale0; the private LAN
+# ---- 2. Firewall: default-deny inbound; SSH on tailscale0 (if any); the private LAN
 if command -v ufw >/dev/null 2>&1; then
   info "ufw already installed"
 else
@@ -88,10 +94,13 @@ fi
 # access. Force ACCEPT so ufw only governs traffic *to the host itself*.
 sudo sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
-info "Configuring ufw: default-deny inbound, SSH on $TS_IFACE"
+info "Configuring ufw: default-deny inbound"
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw allow in on "$TS_IFACE" to any port 22 proto tcp
+if [ "$HAS_TS" = yes ]; then
+  info "SSH on $TS_IFACE"
+  sudo ufw allow in on "$TS_IFACE" to any port 22 proto tcp
+fi
 if [ "$LAN_PRIVATE" = yes ]; then
   # Guests never match this: they reach the host from the libvirt bridge
   # (192.168.122.0/24), not from $LAN, and isolate-guest drops them first anyway.
@@ -130,10 +139,12 @@ if has "$UFW_STATUS" '^Status: active'; then
 else
   echo "  MISSING: ufw not active" >&2; ok=0
 fi
-if has "$UFW_STATUS" "^22/tcp on ${TS_IFACE} +ALLOW"; then
-  echo "  ok: SSH allowed on $TS_IFACE"
-else
-  echo "  MISSING: expected ufw rule for SSH on $TS_IFACE not found" >&2; ok=0
+if [ "$HAS_TS" = yes ]; then
+  if has "$UFW_STATUS" "^22/tcp on ${TS_IFACE} +ALLOW"; then
+    echo "  ok: SSH allowed on $TS_IFACE"
+  else
+    echo "  MISSING: expected ufw rule for SSH on $TS_IFACE not found" >&2; ok=0
+  fi
 fi
 if [ "$LAN_PRIVATE" = yes ]; then
   if has "$UFW_STATUS" "^Anywhere on ${IFACE} +ALLOW +${LAN//./\\.}( |$)"; then
@@ -144,15 +155,18 @@ if [ "$LAN_PRIVATE" = yes ]; then
 fi
 
 if [ "$ok" = 1 ]; then
-  if [ "$LAN_PRIVATE" = yes ]; then
+  if [ "$HAS_TS" = yes ] && [ "$LAN_PRIVATE" = yes ]; then
     info "Done. Reachable via Tailscale ($TS_IP) and from the private LAN $LAN." \
          "Console/sudo passwords still work."
-  else
+  elif [ "$HAS_TS" = yes ]; then
     info "Done. SSH now reachable only via Tailscale ($TS_IP) or the provider's" \
          "out-of-band KVM/IPMI console. Console/sudo passwords still work."
+  else
+    info "Done. Reachable from the private LAN $LAN only (no Tailscale on this host)." \
+         "Console/sudo passwords still work."
   fi
-  echo "Recommended next step: from a DIFFERENT Tailscale device, confirm you" \
-       "can still 'ssh cnetto@$TS_IP' before closing this session."
+  echo "Recommended next step: from ANOTHER machine, confirm you can still ssh in" \
+       "before closing this session."
 else
   info "Done, but some items above are still missing — see MISSING lines."
   exit 1
