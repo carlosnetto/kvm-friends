@@ -13,8 +13,9 @@
 #   - renews the certificate monthly (timer, Persistent=true);
 #   - opens tcp/443 and udp/3478 in ufw to the --allow networks only.
 #
-# Then add the relay to the tailnet policy (admin console → Access controls → JSON editor),
-# as a top-level "derpMap" — see CLAUDE.md, "Private DERP relay".
+# Then — ONLY once the relay is reachable by every peer (router forward of tcp/443 + udp/3478, and
+# the site's PUBLIC address in the entry) — add it to the tailnet policy as a "derpMap". A LAN-only
+# address there strands the guests for peers off the LAN: see CLAUDE.md, "Private DERP relay".
 #
 #   sudo ./setup-derper.sh                                   # allow this host's LAN + its guests
 #   sudo ./setup-derper.sh --allow 192.168.68.0/22 --allow 192.168.122.0/24
@@ -130,4 +131,4 @@ systemctl --no-pager --lines=5 status derper.service || true
 LANIP=$(ip -4 -o addr show dev "$(ip route show default | awk '{print $5; exit}')" | awk '{print $4; exit}' | cut -d/ -f1)
 info "DERP relay up on $HOST ($LANIP): tcp/443, udp/3478"
 echo "    next: on each host whose guests should use it:  ./setup-network.sh --derp $LANIP"
-echo "          and the tailnet policy derpMap (CLAUDE.md, \"Private DERP relay\")"
+echo "          the tailnet derpMap ONLY once the relay is reachable from everywhere (CLAUDE.md, \"Private DERP relay\")"

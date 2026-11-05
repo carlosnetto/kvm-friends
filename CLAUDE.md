@@ -1266,34 +1266,57 @@ its files aside as a cold backup rather than leaving them startable.
 
 Isolated guests talk to each other only over Tailscale. Guests on **different hosts** sit behind
 two NATs (the host's libvirt NAT and the site router), so Tailscale cannot open a direct path and
-relays every byte through a **public** DERP server over the internet (`tailscale ping <peer>` shows
-`via DERP(ord)` and ~1 s round trips). A relay on the LAN keeps that traffic local. It is an
-exception to isolation, kept as narrow as possible: guests may open **tcp/443 and udp/3478 to the
-relay's LAN address only**, outbound; nothing reaches into a guest; the relay serves only this
-tailnet (`--verify-clients`) and only ever sees WireGuard ciphertext.
+relays through a DERP server. By default that is Tailscale's public relay (`tailscale ping <peer>`
+shows `via DERP(ord)`), which is close (~3 ms from Chicago) but rate-limited per client — a
+large push (container images) is throughput-bound, not latency-bound.
+
+**The rule that decides whether a private relay can help: traffic to a node goes through THAT
+node's home relay.** A node homes on the relay it reaches fastest — so a relay on the LAN becomes
+the home of every guest that can reach it, and from then on every peer that wants to reach that
+guest must be able to reach the relay too.
+
+**So a relay reachable only from the LAN breaks every peer outside it.** Measured 2026-11-04: with
+a `derpMap` entry giving the relay's LAN address, two guests restarted `tailscaled`, homed on it,
+and became unreachable from a Mac off-site (and, had the registry VM homed there, from every
+remote box pulling from it). Removing the `derpMap` entry put them back on the public relay within
+a minute. **Do not add a LAN-address `derpMap` entry while any peer of these guests is off the LAN.**
+
+A tailnet subnet route to the LAN does not help: `tailscaled` dials relays over the plain network,
+never through the tailnet (the relay is how it reaches the tailnet in the first place).
+
+**When it works:** the relay reachable by every peer — a router port-forward of tcp/443 and
+udp/3478 to the relay host, and the `derpMap` entry using the site's **public** address. Guests on
+the LAN then reach it through the router (hairpin NAT, if the router supports it) and peers
+elsewhere over the internet; it still serves only this tailnet (`--verify-clients`). That opens an
+inbound port on the router: the owner's call, against the isolation goal.
+
+What the scripts set up — ready for that, harmless without a `derpMap` entry:
 
 ```bash
-# 1. On the relay host (once). Build the binary to match its tailscale version, then:
+# On the relay host (once). Build the binary to match its tailscale version, then:
 GOBIN="$KVM_FRIENDS" go install tailscale.com/cmd/derper@v$(tailscale version | head -1)
 sudo ./setup-derper.sh                      # or: --allow <cidr> ... (default: LAN + its guests)
 
-# 2. Tailnet policy (admin console → Access controls → JSON editor): a top-level "derpMap".
-#    Public relays stay available; each node picks the relay it reaches fastest, so guests on this
-#    LAN choose this one and nodes elsewhere keep the public ones.
-#      "derpMap": {"Regions": {"900": {"RegionID": 900, "RegionCode": "chi-lan",
-#        "RegionName": "Chicago LAN", "Nodes": [{"Name": "900a", "RegionID": 900,
-#        "HostName": "<relay host>.<tailnet>.ts.net", "IPv4": "<relay LAN ip>",
-#        "DERPPort": 443, "STUNPort": 3478}]}}}
+# On every host whose guests should reach it: a narrow isolation exception, applied live.
+./setup-network.sh --derp <relay LAN ip>    # --no-derp removes it
 
-# 3. On EVERY host whose guests should use it (the relay host included). Updates the filter live
-#    on running guests; remembered per host; --no-derp removes it.
-./setup-network.sh --derp <relay LAN ip>
-
-# Check from a guest: the relay is reachable, and peers on other hosts now go via it.
+# From a guest: the relay answers over the LAN.
 curl -s -o /dev/null -w '%{http_code}\n' --resolve <relay host>:443:<relay LAN ip> https://<relay host>/
-tailscale ping -c 3 <peer>        # → via DERP(chi-lan), milliseconds
 ```
 
-The exception applies to every guest on a host that runs `--derp`, including other people's VMs:
-they can reach the relay's two ports but cannot use it (`--verify-clients`), and still nothing else
-on the LAN.
+Then, only with the relay reachable from everywhere, the tailnet policy (admin console → Access
+controls → JSON editor), as a top-level key:
+
+```
+"derpMap": {"Regions": {"900": {"RegionID": 900, "RegionCode": "chi-lan",
+  "RegionName": "Chicago LAN", "Nodes": [{"Name": "900a", "RegionID": 900,
+  "HostName": "<relay host>.<tailnet>.ts.net", "IPv4": "<site PUBLIC ip>",
+  "DERPPort": 443, "STUNPort": 3478}]}}}
+```
+
+A node changes its home relay only for a large absolute gain (~10 ms), so guests already homed on
+the public relay stay there until `tailscaled` restarts — check `tailscale status --self --json`
+(`Self.Relay`) rather than `netcheck`'s "Nearest DERP".
+
+The `--derp` exception applies to every guest on a host, including other people's VMs: they can
+reach the relay's two ports but cannot use it (`--verify-clients`), and still nothing else on the LAN.
