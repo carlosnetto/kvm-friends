@@ -106,28 +106,37 @@ sudo ufw reload
 # ---- 3. Verify -------------------------------------------------------------
 info "Verifying"
 ok=1
-if sudo sshd -T 2>/dev/null | grep -q '^passwordauthentication no'; then
+# Capture each command's output ONCE, then match against the copy. Piping a
+# command straight into `grep -q` under `set -o pipefail` fails even on a match:
+# grep exits at the first hit, the writer dies of SIGPIPE, and the pipeline
+# reports that — so `sshd -T` (long output) read as MISSING when it was set.
+# Plain `ufw status` prints "ALLOW", not "ALLOW IN" (that is `status verbose`).
+SSHD_T=$(sudo sshd -T 2>/dev/null || true)
+UFW_STATUS=$(sudo ufw status 2>/dev/null || true)
+has() { grep -qE "$2" <<<"$1"; }
+
+if has "$SSHD_T" '^passwordauthentication no$'; then
   echo "  ok: sshd password auth disabled"
 else
   echo "  MISSING: sshd password auth still enabled" >&2; ok=0
 fi
-if sudo sshd -T 2>/dev/null | grep -q '^permitrootlogin no'; then
+if has "$SSHD_T" '^permitrootlogin no$'; then
   echo "  ok: sshd root login disabled"
 else
   echo "  MISSING: sshd root login still enabled" >&2; ok=0
 fi
-if sudo ufw status | grep -q "^Status: active"; then
+if has "$UFW_STATUS" '^Status: active'; then
   echo "  ok: ufw active"
 else
   echo "  MISSING: ufw not active" >&2; ok=0
 fi
-if sudo ufw status | grep -qE "22/tcp.*ALLOW IN.*on ${TS_IFACE}|Anywhere on ${TS_IFACE}"; then
+if has "$UFW_STATUS" "^22/tcp on ${TS_IFACE} +ALLOW"; then
   echo "  ok: SSH allowed on $TS_IFACE"
 else
   echo "  MISSING: expected ufw rule for SSH on $TS_IFACE not found" >&2; ok=0
 fi
 if [ "$LAN_PRIVATE" = yes ]; then
-  if sudo ufw status | grep -qE "ALLOW IN +${LAN//./\\.}"; then
+  if has "$UFW_STATUS" "^Anywhere on ${IFACE} +ALLOW +${LAN//./\\.}( |$)"; then
     echo "  ok: private LAN $LAN allowed"
   else
     echo "  MISSING: expected ufw rule for the private LAN $LAN not found" >&2; ok=0
