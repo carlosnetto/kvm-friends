@@ -199,3 +199,42 @@ autostart <vm-name>` if you want the opposite.
 
 *Process validated on 2026-07-08 with a test VM (created, SSH-verified, and
 destroyed).*
+
+## DERP relay: findings (2026-11-04)
+
+**Question.** Guests on different Chicago hosts (a registry VM, a build VM, a test VM) talk only over
+Tailscale. Can they get LAN speed between them without breaking guest isolation?
+
+**What Tailscale does today.** Each guest sits behind two NATs (its host's libvirt NAT and the site
+router), and `isolate-guest` blocks the LAN, so no direct path forms (`tailscale ping` → `direct
+connection not established`). Traffic goes through Tailscale's **public** Chicago relay, `DERP(ord)`.
+
+| Measured | Value |
+|---|---|
+| Guest → public relay `ord` (`tailscale netcheck`) | ~2.9 ms |
+| Guest → private relay on the LAN | 0.4–1.5 ms |
+| Guest ↔ guest via `ord` (`tailscale ping`) | ~7 ms |
+| Full image build on the Chicago build VM, pushed to the Chicago registry VM via `ord` | 9–10.5 min |
+| The same build from a Mac in Brazil | ~22 min |
+
+**Tried: a private DERP relay on the LAN** (`setup-derper.sh`, `setup-network.sh --derp`). The relay
+works and guests reach it in under 1.5 ms. Putting its **LAN address** in the tailnet `derpMap` broke
+things: traffic to a node goes through that node's **home** relay, a guest homes on the fastest relay
+it can reach — the LAN one — and from then on peers off the LAN (the Mac in Brazil; for the registry
+VM, every remote box pulling from it) cannot reach that guest. Two guests were unreachable from the
+Mac for about ten minutes until the `derpMap` entry was removed. A tailnet subnet route to the LAN
+does not help: `tailscaled` dials relays over the plain network, never through the tailnet. Details
+in CLAUDE.md, "Private DERP relay".
+
+**Options for later** (each needs the site owner's call against the isolation goal):
+
+1. **Relay reachable from everywhere:** router forward of tcp/443 + udp/3478 to the relay host, the
+   site's public address in the `derpMap`. Simplest that works; serves only this tailnet
+   (`--verify-clients`).
+2. **Direct guest-to-guest over the LAN**, no relay: a STUN-only `derpMap` entry on the LAN (never a
+   home, so nothing is stranded) so guests learn a LAN-usable address, plus UDP allowed between the
+   hosts' LAN addresses — needs an experiment; or bridged guests with UDP allowed between them only.
+
+**Decision (2026-11-04): stay on the public Chicago relay.** It is ~3 ms from the guests, already a
+large gain over Brazil ↔ Chicago, and no isolation exception is needed for it. The private relay is
+dropped for now; the scripts stay in this repo for when option 1 or 2 is taken up.
