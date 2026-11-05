@@ -646,9 +646,10 @@ ssh-keygen -R <vm-ip>   # clear stale host key so a reused IP doesn't warn
 
 `./harden-host.sh` locks down the **host's** sshd (not the guests'):
 password auth is off, and ufw default-denies inbound with two ways in: SSH
-on `tailscale0`, and — when the host's LAN is **private** (RFC1918, behind a
-router) — everything from that LAN, so the host is reachable like any other
-machine there. On a colo/VPS box whose NIC sits on a **public** subnet the
+on `tailscale0` when the host runs Tailscale (not every host does), and —
+when the host's LAN is **private** (RFC1918, behind a router) — everything
+from that LAN, so the host is reachable like any other machine there. A host
+with neither is refused, since nothing would stay open. On a colo/VPS box whose NIC sits on a **public** subnet the
 LAN rule is skipped and the host stays Tailscale-only. ufw's forward policy
 is forced to ACCEPT so libvirt's own NAT rules for the VMs keep working.
 
@@ -660,8 +661,8 @@ made the host Tailscale-only even on a private LAN, which blocked SSH from a
 laptop on the same LAN — more than intended. The machine's physical console —
 or, on a rented server, the provider's out-of-band KVM/IPMI console — is
 the sole fallback if Tailscale is ever unreachable (on a public subnet). Console/`sudo` passwords are untouched. It
-refuses to run unless `tailscale0` is up and the current session is
-already coming in over Tailscale, the private LAN, or the local console,
+refuses to run unless the current session is coming in over Tailscale, the
+private LAN, or the local console,
 so it cannot sever the session running it. Idempotent.
 
 Any bare-metal Ubuntu 24.04 machine works as a host — the current ones run
